@@ -195,8 +195,8 @@ DATASET_DEFAULT_CONFIG = {
     },
     "optc_h201": {
         "raw_dir": "",
-        "database": "optc_201",
-        "database_all_file": "optc_201",
+        "database": "optc_h201",
+        "database_all_file": "optc_h201",
         "num_node_types": 3,
         "num_edge_types": 10,
         "year_month": "2019-09",
@@ -214,8 +214,8 @@ DATASET_DEFAULT_CONFIG = {
     },
     "optc_h501": {
         "raw_dir": "",
-        "database": "optc_501",
-        "database_all_file": "optc_501",
+        "database": "optc_h501",
+        "database_all_file": "optc_h501",
         "num_node_types": 3,
         "num_edge_types": 10,
         "year_month": "2019-09",
@@ -233,8 +233,8 @@ DATASET_DEFAULT_CONFIG = {
     },
     "optc_h051": {
         "raw_dir": "",
-        "database": "optc_051",
-        "database_all_file": "optc_051",
+        "database": "optc_h051",
+        "database_all_file": "optc_h051",
         "num_node_types": 3,
         "num_edge_types": 10,
         "year_month": "2019-09",
@@ -985,6 +985,12 @@ EXPERIMENTS_CONFIG = {
         "run_evaluation": Arg(
             str, vals=OR(["each_epoch", "best_epoch"])
         ),  # (when to run inference on test set)
+        "save_checkpoints": Arg(
+            bool, desc="Whether to save model checkpoint after each epoch"
+        ),
+        "checkpoint_keep_every_n_epochs": Arg(
+            int, desc="Save checkpoint every N epochs. Set to 1 to save all epochs."
+        ),
     },
     "experiment": {
         "used_method": Arg(str, vals=OR(["uncertainty", "none"])),
