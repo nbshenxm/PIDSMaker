@@ -17,11 +17,24 @@ for dump_file in /data/*.dump; do
   if psql -U postgres -h localhost -p 5432 -lqt | cut -d \| -f 1 | grep -qw "$db_name"; then
     echo "Database '$db_name' already exists. Checking if it has data..."
     
-    table_count=$(psql -U postgres -h localhost -p 5432 -d "$db_name" -t -c "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public';" 2>/dev/null || echo "0")
-    
+    table_count=$(psql -U postgres -h localhost -p 5432 -d "$db_name" -t -c "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public';" 2>/dev/null | tr -d '[:space:]' || echo "0")
+
+    if [ -z "$table_count" ]; then
+      table_count="0"
+    fi
+
     if [ "$table_count" -gt 0 ]; then
-      echo "Database '$db_name' already has $table_count tables. Skipping restoration."
-      continue
+      event_count=$(psql -U postgres -h localhost -p 5432 -d "$db_name" -t -c "SELECT COUNT(*) FROM event_table;" 2>/dev/null | tr -d '[:space:]' || echo "0")
+      if [ -z "$event_count" ]; then
+        event_count="0"
+      fi
+
+      if [ "$event_count" -gt 0 ]; then
+        echo "Database '$db_name' already has $table_count tables and $event_count events. Skipping restoration."
+        continue
+      fi
+
+      echo "Database '$db_name' has schema but no events. Restoring dump to repopulate data..."
     else
       echo "Database '$db_name' exists but is empty. Proceeding with restoration..."
     fi
@@ -38,8 +51,9 @@ for dump_file in /data/*.dump; do
   if pg_restore -U postgres -h localhost -p 5432 --clean --if-exists --no-owner --no-privileges -d "$db_name" "$dump_file" 2>/dev/null; then
     echo "Successfully restored $dump_file"
     
-    final_table_count=$(psql -U postgres -h localhost -p 5432 -d "$db_name" -t -c "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public';" 2>/dev/null || echo "0")
-    echo "  Database '$db_name' now has $final_table_count tables"
+    final_table_count=$(psql -U postgres -h localhost -p 5432 -d "$db_name" -t -c "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public';" 2>/dev/null | tr -d '[:space:]' || echo "0")
+    final_event_count=$(psql -U postgres -h localhost -p 5432 -d "$db_name" -t -c "SELECT COUNT(*) FROM event_table;" 2>/dev/null | tr -d '[:space:]' || echo "0")
+    echo "  Database '$db_name' now has $final_table_count tables and $final_event_count events"
   else
     echo "Warning: pg_restore reported errors for $dump_file (this may be normal for some dump formats)"
   fi
