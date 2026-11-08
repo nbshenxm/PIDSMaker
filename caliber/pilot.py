@@ -10,9 +10,11 @@ No test labels are used for any choice:
     CALIBRATION half (B), used for ensemble conformal p-values / thresholds.
 
 Signals per test node x, over members m = 1..M:
-  z_m(x) = -log10 p_m(x),  p_m from member m's A-half scores
+  z_m(x) = member-normalised score, fitted on member m's A-half scores:
+           robust_z (default): (x - median_A) / (1.4826 * MAD_A)
+           logp:               -log10 p_m(x)  (saturates above max(A): ties at the top)
   S(x)   = mean_m z_m(x)       suspicion   (ensemble score)
-  U(x)   = std_m  z_m(x)       disagreement (rank-normalised, so not a scale artefact)
+  U(x)   = std_m  z_m(x)       disagreement (normalised, so not a raw-scale artefact)
   V(x)   = fraction of members whose raw score exceeds their own max-val threshold
 
 Usage (on the cluster, pids3 env):
@@ -83,7 +85,21 @@ def cv_auc(X, y, seed=0, folds=5):
     return {"auroc": _auc(y, pred), "ap": _ap(y, pred)}
 
 
-def analyse_group(members, labels, epoch_rule="min_val_loss", cache_dir=None, log=print):
+def normaliser(ref, kind="robust_z"):
+    ref = np.asarray(ref, dtype=np.float64)
+    if kind == "robust_z":
+        med = np.median(ref)
+        mad = 1.4826 * np.median(np.abs(ref - med))
+        if mad <= 0:
+            mad = ref.std() or 1.0
+        return lambda x: (np.asarray(x, dtype=np.float64) - med) / mad
+    if kind == "logp":
+        return lambda x: -np.log10(conformal.pvalues(ref, x))
+    raise ValueError(kind)
+
+
+def analyse_group(members, labels, epoch_rule="min_val_loss", cache_dir=None, log=print,
+                  norm="robust_z"):
     mal = set(labels["malicious_nids"])
     per_member, z_test, z_cal, raw_test, vote = [], [], [], [], []
     test_index = None
@@ -110,8 +126,9 @@ def analyse_group(members, labels, epoch_rule="min_val_loss", cache_dir=None, lo
         log(f"  seed {m['seed']:>3} epoch {ep:>2}: AUROC={per_member[-1]['auroc']} "
             f"AP={per_member[-1]['ap']} maxval={per_member[-1]['maxval']}")
 
-        z_test.append(-np.log10(conformal.pvalues(val_a, test["score"].values)))
-        z_cal.append(-np.log10(conformal.pvalues(val_a, val_b)))
+        f_norm = normaliser(val_a, norm)
+        z_test.append(f_norm(test["score"].values))
+        z_cal.append(f_norm(val_b))
         raw_test.append(test["score"].values)
         vote.append(flag)
 
@@ -124,7 +141,7 @@ def analyse_group(members, labels, epoch_rule="min_val_loss", cache_dir=None, lo
     n_cal = len(S_cal)
 
     out = {"n_members": len(members), "n_test_nodes": int(len(y)), "n_malicious_test_nodes": int(y.sum()),
-           "n_cal_nodes": int(n_cal), "epoch_rule": epoch_rule, "members": per_member}
+           "n_cal_nodes": int(n_cal), "epoch_rule": epoch_rule, "norm": norm, "members": per_member}
 
     # --- instability of the single-run detector
     keys = ["auroc", "ap"]
@@ -222,6 +239,7 @@ def main():
     ap.add_argument("--group")
     ap.add_argument("--epoch_rule", default="min_val_loss", choices=["min_val_loss", "last"])
     ap.add_argument("--min_members", type=int, default=3)
+    ap.add_argument("--norm", default="robust_z", choices=["robust_z", "logp"])
     args = ap.parse_args()
 
     cache = os.path.join(args.artifact_dir, "caliber", "cache")
@@ -236,8 +254,8 @@ def main():
             continue
         print(f"== {key}: {len(members)} members")
         labels, _ = data.load_labels(args.artifact_dir, key[1], members[0]["ground_truth_version"])
-        res, arrays = analyse_group(members, labels, args.epoch_rule, cache)
-        base = os.path.join(rep_dir, f"pilot_{key[0]}_{key[1]}_{key[2]}_{args.epoch_rule}")
+        res, arrays = analyse_group(members, labels, args.epoch_rule, cache, norm=args.norm)
+        base = os.path.join(rep_dir, f"pilot_{key[0]}_{key[1]}_{key[2]}_{args.epoch_rule}_{args.norm}")
         with open(base + ".json", "w", encoding="utf-8") as f:
             json.dump(res, f, indent=2)
         pd.DataFrame(arrays).to_parquet(base + "_nodes.parquet", index=False)
