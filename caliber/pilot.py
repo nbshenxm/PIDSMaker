@@ -98,23 +98,77 @@ def normaliser(ref, kind="robust_z"):
     raise ValueError(kind)
 
 
+def unit_table(df, unit="node", window="batch", topk=5):
+    """Scores per decision unit, with the unit's time span [t0, t1].
+
+    node:          one row per entity over the whole split (PIDSMaker node evaluation)
+    entity_window: one row per (window, entity)
+    window:        one row per window; score = mean of its top-k entity scores
+    """
+    if unit == "node":
+        t = data.node_scores(df)
+        return t
+    long = data._node_long(df)
+    long["w"] = data.window_ids(long, window)
+    g = long.groupby(["w", "node"])
+    ew = pd.DataFrame({"score": g["loss"].max(), "t0": g["time"].min(), "t1": g["time"].max()})
+    if unit == "entity_window":
+        return ew
+    if unit == "window":
+        gw = ew.groupby(level="w")
+        return pd.DataFrame({
+            "score": gw["score"].apply(lambda s: np.sort(s.values)[::-1][:topk].mean()),
+            "t0": gw["t0"].min(), "t1": gw["t1"].max(),
+        })
+    raise ValueError(unit)
+
+
+def unit_labels(tbl, unit, labels, ew_tbl=None):
+    """Ground truth per unit. Time-based units are malicious only when the entity is in
+    an attack's ground truth AND the unit's time span overlaps that attack's interval."""
+    if unit == "node":
+        return np.isin(tbl.index.values, labels["malicious_nids"])
+    if unit == "entity_window":
+        nodes = tbl.index.get_level_values("node").values
+        t0, t1 = tbl["t0"].values, tbl["t1"].values
+        y = np.zeros(len(tbl), bool)
+        for a in labels["attacks"]:
+            y |= np.isin(nodes, a["nids"]) & (t1 >= a["start_ns"]) & (t0 <= a["end_ns"])
+        return y
+    if unit == "window":
+        y_ew = unit_labels(ew_tbl, "entity_window", labels)
+        mal_w = set(ew_tbl.index.get_level_values("w").values[y_ew])
+        return np.isin(tbl.index.values, list(mal_w))
+    raise ValueError(unit)
+
+
+def _half_keys(index):
+    if isinstance(index, pd.MultiIndex):
+        w = index.get_level_values(0).values.astype(np.int64)
+        n = index.get_level_values(1).values.astype(np.int64)
+        return _half(np.abs(n * 1000003 + w))
+    return _half(np.abs(index.values.astype(np.int64)))
+
+
 def analyse_group(members, labels, epoch_rule="min_val_loss", cache_dir=None, log=print,
-                  norm="robust_z"):
-    mal = set(labels["malicious_nids"])
+                  norm="robust_z", unit="node", window="batch"):
     per_member, z_test, z_cal, raw_test, vote = [], [], [], [], []
     test_index = None
+    y = None
 
     for m in members:
         ep = data.select_epoch(m, epoch_rule, cache_dir)
-        val = data.node_scores(data.read_split(m["edge_losses_dir"], "val", ep, cache_dir))
-        test = data.node_scores(data.read_split(m["edge_losses_dir"], "test", ep, cache_dir))
+        val = unit_table(data.read_split(m["edge_losses_dir"], "val", ep, cache_dir), unit, window)
+        test_df = data.read_split(m["edge_losses_dir"], "test", ep, cache_dir)
+        test = unit_table(test_df, unit, window)
         if test_index is None:
             test_index = test.index
+            ew = unit_table(test_df, "entity_window", window) if unit == "window" else None
+            y = unit_labels(test, unit, labels, ew)
         test = test.reindex(test_index)
 
-        in_a = _half(val.index.values)
+        in_a = _half_keys(val.index)
         val_a, val_b = val["score"].values[in_a], val["score"].values[~in_a]
-        y = np.isin(test_index.values, list(mal))
 
         thr_maxval = val["score"].max()            # PIDSMaker max_val_loss
         flag = test["score"].values > thr_maxval
@@ -132,7 +186,6 @@ def analyse_group(members, labels, epoch_rule="min_val_loss", cache_dir=None, lo
         raw_test.append(test["score"].values)
         vote.append(flag)
 
-    y = np.isin(test_index.values, list(mal))
     Zt, Zc = np.vstack(z_test), np.vstack(z_cal)
     S, U = Zt.mean(0), Zt.std(0)
     S_cal = Zc.mean(0)
@@ -140,7 +193,8 @@ def analyse_group(members, labels, epoch_rule="min_val_loss", cache_dir=None, lo
     p_ens = conformal.pvalues(S_cal, S)
     n_cal = len(S_cal)
 
-    out = {"n_members": len(members), "n_test_nodes": int(len(y)), "n_malicious_test_nodes": int(y.sum()),
+    out = {"n_members": len(members), "unit": unit, "window": window,
+           "n_test_nodes": int(len(y)), "n_malicious_test_nodes": int(y.sum()),
            "n_cal_nodes": int(n_cal), "epoch_rule": epoch_rule, "norm": norm, "members": per_member}
 
     # --- instability of the single-run detector
@@ -192,19 +246,25 @@ def analyse_group(members, labels, epoch_rule="min_val_loss", cache_dir=None, lo
     # single member (seed of the first member), calibrated on its own B half
     m0 = members[0]
     ep0 = per_member[0]["epoch"]
-    val0 = data.node_scores(data.read_split(m0["edge_losses_dir"], "val", ep0, cache_dir))
-    b0 = val0["score"].values[~_half(val0.index.values)]
+    val0 = unit_table(data.read_split(m0["edge_losses_dir"], "val", ep0, cache_dir), unit, window)
+    b0 = val0["score"].values[~_half_keys(val0.index)]
     p0 = conformal.pvalues(b0, raw_test[0])
     out["q3_far"]["member0"] = conformal.empirical_far(p0[benign], ALPHAS)
 
-    # --- H1 degree confound among flagged
-    return out, {"S": S, "U": U, "V": V, "p_ens": p_ens, "y": y, "nodes": test_index.values}
+    arrays = {"S": S, "U": U, "V": V, "p_ens": p_ens, "y": y}
+    if isinstance(test_index, pd.MultiIndex):
+        arrays["w"] = test_index.get_level_values(0).values
+        arrays["node"] = test_index.get_level_values(1).values
+    else:
+        arrays["key"] = test_index.values
+    return out, arrays
 
 
 def to_markdown(key, res):
     system, dataset, group = key
-    L = [f"### {system} / {dataset} (group {group}) — M={res['n_members']}, "
-         f"{res['n_malicious_test_nodes']} malicious / {res['n_test_nodes']} test nodes", ""]
+    L = [f"### {system} / {dataset} (group {group}) — unit={res['unit']} ({res['window']}), "
+         f"M={res['n_members']}, {res['n_malicious_test_nodes']} malicious / {res['n_test_nodes']} "
+         f"test units, {res['n_cal_nodes']} calibration units", ""]
     ms = res["member_spread"]
     L.append(f"- Single members: AUROC {ms['auroc']['mean']:.3f}±{ms['auroc']['std']:.3f} "
              f"[{ms['auroc']['min']:.3f}, {ms['auroc']['max']:.3f}], AP {ms['ap']['mean']:.3f}±{ms['ap']['std']:.3f} "
@@ -240,6 +300,8 @@ def main():
     ap.add_argument("--epoch_rule", default="min_val_loss", choices=["min_val_loss", "last"])
     ap.add_argument("--min_members", type=int, default=3)
     ap.add_argument("--norm", default="robust_z", choices=["robust_z", "logp"])
+    ap.add_argument("--unit", default="node", choices=["node", "entity_window", "window"])
+    ap.add_argument("--window", default="batch", help="'batch' or '<N>min', for time-based units")
     args = ap.parse_args()
 
     cache = os.path.join(args.artifact_dir, "caliber", "cache")
@@ -254,14 +316,16 @@ def main():
             continue
         print(f"== {key}: {len(members)} members")
         labels, _ = data.load_labels(args.artifact_dir, key[1], members[0]["ground_truth_version"])
-        res, arrays = analyse_group(members, labels, args.epoch_rule, cache, norm=args.norm)
-        base = os.path.join(rep_dir, f"pilot_{key[0]}_{key[1]}_{key[2]}_{args.epoch_rule}_{args.norm}")
+        res, arrays = analyse_group(members, labels, args.epoch_rule, cache, norm=args.norm,
+                                    unit=args.unit, window=args.window)
+        tag = f"{args.unit}-{args.window}_{args.epoch_rule}_{args.norm}"
+        base = os.path.join(rep_dir, f"pilot_{key[0]}_{key[1]}_{key[2]}_{tag}")
         with open(base + ".json", "w", encoding="utf-8") as f:
             json.dump(res, f, indent=2)
-        pd.DataFrame(arrays).to_parquet(base + "_nodes.parquet", index=False)
+        pd.DataFrame(arrays).to_parquet(base + "_units.parquet", index=False)
         md.append(to_markdown(key, res))
         print(md[-1])
-    out = os.path.join(rep_dir, f"pilot_{stamp}_{args.epoch_rule}.md")
+    out = os.path.join(rep_dir, f"pilot_{stamp}_{args.unit}-{args.window}_{args.epoch_rule}.md")
     with open(out, "w", encoding="utf-8") as f:
         f.write("\n".join(md))
     print(f"report: {out}")
