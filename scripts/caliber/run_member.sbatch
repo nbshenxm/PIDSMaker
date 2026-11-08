@@ -26,7 +26,13 @@ ARTIFACT_DIR="${ARTIFACT_DIR:-/fs1/projects/benchmarking_PIDS/sherwin_dir/artifa
 DB_INFO="${DB_INFO:-/fs1/projects/benchmarking_PIDS/sherwin_dir/db_server.info}"
 CONDA_ENV="${CONDA_ENV:-pids3}"
 BASE_SEED="${BASE_SEED:-0}"
-SEED=$(( BASE_SEED + ${SLURM_ARRAY_TASK_ID:-0} ))
+# SEEDS (space-separated) runs several members sequentially in one job, which
+# keeps the number of submitted jobs low (the account has a submit limit).
+if [[ -n "${SEEDS:-}" ]]; then
+    read -r -a SEED_LIST <<< "${SEEDS}"
+else
+    SEED_LIST=( $(( BASE_SEED + ${SLURM_ARRAY_TASK_ID:-0} )) )
+fi
 
 cd "${REPO_DIR}"
 [[ -f "${DB_INFO}" ]] || { echo "ERROR: ${DB_INFO} missing - start scripts/caliber/db_server.sbatch first"; exit 1; }
@@ -42,16 +48,16 @@ export CUBLAS_WORKSPACE_CONFIG=:4096:8
 export PYTHONHASHSEED=0
 export NLTK_DATA="${NLTK_DATA:-${HOME}/nltk_data}"
 
-echo "host=$(hostname) system=${SYSTEM} dataset=${DATASET} seed=${SEED} db=${DB_HOST}:${DB_PORT}"
+echo "host=$(hostname) system=${SYSTEM} dataset=${DATASET} seeds=${SEED_LIST[*]} db=${DB_HOST}:${DB_PORT}"
 echo "extra args: ${EXTRA_ARGS[*]:-<none>}"
 echo "git: $(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
-date
 
-python pidsmaker/main.py "${SYSTEM}" "${DATASET}" \
-    --artifact_dir "${ARTIFACT_DIR}" \
-    --database_host "${DB_HOST}" --database_port "${DB_PORT}" \
-    --training.seed "${SEED}" \
-    "${EXTRA_ARGS[@]}"
-
-date
-echo "member done: ${SYSTEM} ${DATASET} seed=${SEED}"
+for SEED in "${SEED_LIST[@]}"; do
+    echo "=== member start: seed=${SEED} $(date)"
+    python pidsmaker/main.py "${SYSTEM}" "${DATASET}" \
+        --artifact_dir "${ARTIFACT_DIR}" \
+        --database_host "${DB_HOST}" --database_port "${DB_PORT}" \
+        --training.seed "${SEED}" \
+        "${EXTRA_ARGS[@]}"
+    echo "=== member done: ${SYSTEM} ${DATASET} seed=${SEED} $(date)"
+done
