@@ -60,3 +60,8 @@ evaluation:
   node_evaluation:
     threshold_method: threatrace
     use_kmeans: False
+
+training_loop:
+  # run_evaluation: best_epoch  # Set by experiment config (default: each_epoch in none.yml)
+  save_checkpoints: true
+  checkpoint_keep_every_n_epochs: 1

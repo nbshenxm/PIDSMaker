@@ -4,6 +4,9 @@
 
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
 # Detect which container runtime is available
 if command -v apptainer &> /dev/null; then
     CONTAINER_CMD="apptainer"
@@ -46,8 +49,20 @@ fi
 echo -e "${YELLOW}Creating directories...${NC}"
 mkdir -p $DATA_DIR $RUN_DIR $LOG_DIR
 
-# Create INPUT_DIR if it doesn't exist
-INPUT_DIR=${INPUT_DIR:-$(pwd)/data}
+# Resolve dump source directory.
+# Prefer the repository-level data directory for the default full-setup flow.
+DEFAULT_INPUT_DIR="$REPO_ROOT/data"
+if [ -z "${INPUT_DIR:-}" ]; then
+    if [ -d "$DEFAULT_INPUT_DIR" ]; then
+        INPUT_DIR="$DEFAULT_INPUT_DIR"
+    else
+        INPUT_DIR="$(pwd)/data"
+    fi
+fi
+
+# Ensure INPUT_DIR is absolute so bind mounts are stable from any working dir.
+INPUT_DIR="$(cd "$INPUT_DIR" 2>/dev/null && pwd || echo "$INPUT_DIR")"
+
 if [ ! -d "$INPUT_DIR" ]; then
     echo -e "${YELLOW}Creating INPUT_DIR: $INPUT_DIR${NC}"
     mkdir -p "$INPUT_DIR"

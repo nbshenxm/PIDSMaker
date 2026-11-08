@@ -10,6 +10,7 @@ Handles model training with:
 """
 
 import copy
+import os
 import tracemalloc
 from time import perf_counter as timer
 
@@ -17,6 +18,7 @@ import numpy as np
 import torch
 import wandb
 
+from pidsmaker.detection.checkpoint_manager import CheckpointManager
 from pidsmaker.factory import (
     build_model,
     optimizer_factory,
@@ -45,6 +47,11 @@ def main(cfg):
     """
     set_seed(cfg, seed=cfg.training.seed)
 
+    if getattr(cfg, "_model", None) == "velox":
+        from pidsmaker.pids.velox.trainer import VeloxTrainer
+
+        return VeloxTrainer.run(cfg)
+
     log_start(__file__)
     device = get_device(cfg)
     use_cuda = device == torch.device("cuda")
@@ -60,6 +67,19 @@ def main(cfg):
         data_sample=train_data[0][0], device=device, cfg=cfg, max_node_num=max_node_num
     )
     optimizer = optimizer_factory(cfg, parameters=set(model.parameters()))
+
+    # Initialize checkpoint manager if saving is enabled (disabled by default)
+    checkpoint_manager = None
+    save_checkpoints = getattr(cfg.training_loop, "save_checkpoints", False)
+    if save_checkpoints:
+        checkpoint_keep_every_n = getattr(cfg.training_loop, "checkpoint_keep_every_n_epochs", 1)
+        checkpoints_dir = os.path.join(cfg.training._task_path, "checkpoints")
+        checkpoint_manager = CheckpointManager(
+            checkpoint_dir=checkpoints_dir,
+            keep_every_n=checkpoint_keep_every_n,
+            cfg=cfg,
+        )
+        log(f"Checkpoint manager initialized at {checkpoints_dir}", return_line=True)
 
     run_evaluation = cfg.training_loop.run_evaluation
     assert run_evaluation in ["best_epoch", "each_epoch"], (
@@ -79,6 +99,9 @@ def main(cfg):
     global_best_val_score = float("-inf")
     use_few_shot = cfg.training.decoder.use_few_shot
     grad_acc = cfg.training.grad_accumulation
+    selection_metric_name = "val_score" if use_few_shot else "-val_loss"
+    best_selection_metric = float("-inf")
+    best_selection_epoch = -1
 
     if use_few_shot:
         num_epochs += 1  # in few-shot, the first epoch is without ssl training
@@ -233,12 +256,37 @@ def main(cfg):
             )
             all_test_stats.append(test_stats)
 
+            # For non-few-shot objectives, val_score is currently constant (0.0).
+            # Use -val_loss so lower validation loss means a better checkpoint.
+            checkpoint_selection_metric = (
+                test_stats["val_score"] if use_few_shot else -float(test_stats["val_loss"])
+            )
+
+            if checkpoint_selection_metric > best_selection_metric:
+                best_selection_metric = checkpoint_selection_metric
+                best_selection_epoch = epoch
+            
+            # Save checkpoint after evaluation
+            if checkpoint_manager is not None:
+                checkpoint_manager.save_checkpoint(
+                    model,
+                    epoch=epoch,
+                    val_score=checkpoint_selection_metric,
+                    train_loss=tot_loss,
+                )
+
+            log(
+                f"[@epoch{epoch:02d}] Eval finished - val_loss: {test_stats['val_loss']:.4f} | test_loss: {test_stats['test_loss']:.4f} | selection_metric({selection_metric_name}): {checkpoint_selection_metric:.6f} | best_epoch_so_far: {best_selection_epoch}",
+                return_line=True,
+            )
+
             wandb.log(
                 {
                     "epoch": epoch,
                     "train_epoch": epoch,
                     "train_loss": round(tot_loss, 4),
                     "val_score": round(test_stats["val_score"], 4),
+                    "checkpoint_selection_metric": round(checkpoint_selection_metric, 6),
                     "val_loss": round(test_stats["val_loss"], 4),
                     "test_loss": round(test_stats["test_loss"], 4),
                 }
@@ -246,7 +294,12 @@ def main(cfg):
 
     # After training
     if best_epoch_mode:
-        model.load_state_dict(best_model)
+        # Load best checkpoint if available, otherwise use stored state
+        if checkpoint_manager is not None:
+            checkpoint_manager.load_best_checkpoint(model)
+        else:
+            model.load_state_dict(best_model)
+        
         test_stats = inference_loop.main(
             cfg=cfg,
             model=model,

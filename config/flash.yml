@@ -68,3 +68,8 @@ evaluation:
     threshold_method: flash
     use_dst_node_loss: True
     use_kmeans: False
+
+training_loop:
+  # run_evaluation: best_epoch  # Set by experiment config (default: each_epoch in none.yml)
+  save_checkpoints: true
+  checkpoint_keep_every_n_epochs: 1

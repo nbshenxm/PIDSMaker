@@ -162,3 +162,8 @@ evaluation:
   edge_evaluation:
     malicious_edge_selection: src_node
     threshold_method: max_val_loss
+
+training_loop:
+  # run_evaluation: best_epoch  # Set by experiment config (default: each_epoch in none.yml)
+  save_checkpoints: true
+  checkpoint_keep_every_n_epochs: 1

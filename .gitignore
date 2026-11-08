@@ -187,3 +187,7 @@ postgres_data
 nltk_data
 
 .claude
+
+# slurm output files
+slurm-*.out
+slurm-*.err

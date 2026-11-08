@@ -74,3 +74,8 @@ evaluation:
   node_evaluation:
     threshold_method: magic # can't use anything else here
     use_dst_node_loss: True
+
+training_loop:
+  # run_evaluation: best_epoch  # Set by experiment config (default: each_epoch in none.yml)
+  save_checkpoints: true
+  checkpoint_keep_every_n_epochs: 1

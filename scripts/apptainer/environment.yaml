@@ -6,6 +6,9 @@ dependencies:
 - python=3.9.23
 - python_abi=3.9
 - psycopg2
+- libstdcxx-ng
+- libgcc-ng
+- icu
 - tqdm
 - pip:
   - --extra-index-url https://download.pytorch.org/whl/cu117

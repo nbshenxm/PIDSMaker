@@ -91,3 +91,8 @@ evaluation:
     used_method: kairos_idf_queue
     kairos_idf_queue:
       include_test_set_in_IDF: True
+
+training_loop:
+  # run_evaluation: best_epoch  # Set by experiment config (default: each_epoch in none.yml)
+  save_checkpoints: true
+  checkpoint_keep_every_n_epochs: 1
