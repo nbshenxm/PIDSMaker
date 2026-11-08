@@ -42,6 +42,9 @@ set +u
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate "${CONDA_ENV}"
 set -u
+# The env's libstdc++ must win over /lib64's (nltk -> sqlite3 -> ICU needs CXXABI_1.3.15).
+export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
+python -c "import torch; print('torch', torch.__version__, 'cuda available:', torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else '')"
 export PYTHONPATH="${REPO_DIR}:${PYTHONPATH:-}"
 # Determinism knobs used by upstream scripts/run.sh
 export CUBLAS_WORKSPACE_CONFIG=:4096:8

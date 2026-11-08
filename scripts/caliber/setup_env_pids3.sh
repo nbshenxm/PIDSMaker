@@ -27,7 +27,9 @@ pip install torch==2.1.2+cu121 torchvision==0.16.2+cu121 torchaudio==2.1.2+cu121
     --extra-index-url https://download.pytorch.org/whl/cu121
 
 pip install torch_geometric==2.6.1 --no-cache-dir
-pip install pyg_lib==0.4.0 torch_scatter==2.1.2 torch_sparse==0.6.18 \
+# pyg_lib is omitted on purpose: its wheel needs glibc>=2.29 (cluster is RHEL8,
+# glibc 2.28) and, when present, its failed load also disables torch_sparse.
+pip install torch_scatter==2.1.2 torch_sparse==0.6.18 \
     torch_cluster==1.6.3 torch_spline_conv==1.2.2 \
     -f https://data.pyg.org/whl/torch-2.1.0+cu121.html --no-cache-dir
 
