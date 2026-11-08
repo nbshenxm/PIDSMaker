@@ -62,5 +62,8 @@ for SEED in "${SEED_LIST[@]}"; do
         --database_host "${DB_HOST}" --database_port "${DB_PORT}" \
         --training.seed "${SEED}" \
         "${EXTRA_ARGS[@]}"
+    # Record where this member's outputs live (consumed by caliber.data).
+    python -m caliber.pidsmaker_bridge manifest "${SYSTEM}" "${DATASET}" \
+        --artifact_dir "${ARTIFACT_DIR}" --training.seed "${SEED}" "${EXTRA_ARGS[@]}"
     echo "=== member done: ${SYSTEM} ${DATASET} seed=${SEED} $(date)"
 done
