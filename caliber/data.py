@@ -53,10 +53,15 @@ def load_labels(artifact_dir, dataset, gt_version):
 
 # ----------------------------------------------------------------------------- edge losses
 def list_epochs(edge_losses_dir, split):
+    """Epochs present either as CSV directories or as packed Parquet files."""
     d = os.path.join(edge_losses_dir, split)
     if not os.path.isdir(d):
         return []
-    return sorted(int(x.rsplit("_", 1)[-1]) for x in os.listdir(d) if x.startswith("model_epoch_"))
+    eps = set()
+    for x in os.listdir(d):
+        if x.startswith("model_epoch_") and not x.endswith(".tmp"):
+            eps.add(int(x.split(".")[0].rsplit("_", 1)[-1]))
+    return sorted(eps)
 
 
 def _cache_path(cache_dir, edge_losses_dir, split, epoch):
@@ -66,6 +71,12 @@ def _cache_path(cache_dir, edge_losses_dir, split, epoch):
 
 def read_split(edge_losses_dir, split, epoch, cache_dir=None):
     """All edges of one split/epoch as a DataFrame; column `b` = batch index (file order)."""
+    packed = os.path.join(edge_losses_dir, split, f"model_epoch_{epoch}.parquet")
+    if os.path.exists(packed):
+        df = pd.read_parquet(packed)
+        df["loss"] = df["loss"].astype(np.float32)
+        df["b"] = df["b"].astype(np.int32)
+        return df
     if cache_dir:
         cp = _cache_path(cache_dir, edge_losses_dir, split, epoch)
         if os.path.exists(cp):

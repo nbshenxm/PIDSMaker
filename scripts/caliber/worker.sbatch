@@ -41,6 +41,7 @@ export PYTHONPATH="${REPO_DIR}:${PYTHONPATH:-}"
 export CUBLAS_WORKSPACE_CONFIG=:4096:8
 export PYTHONHASHSEED=0
 export NLTK_DATA="${NLTK_DATA:-${HOME}/nltk_data}"
+export CALIBER_PACK=1   # pack edge-loss CSVs after each member (file-count quota)
 python -c "import torch; print('worker', '${JOB}', 'on', '$(hostname)', 'cuda:', torch.cuda.is_available())"
 
 START=$(date +%s)

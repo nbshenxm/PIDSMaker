@@ -50,6 +50,7 @@ export PYTHONPATH="${REPO_DIR}:${PYTHONPATH:-}"
 export CUBLAS_WORKSPACE_CONFIG=:4096:8
 export PYTHONHASHSEED=0
 export NLTK_DATA="${NLTK_DATA:-${HOME}/nltk_data}"
+export CALIBER_PACK=1   # pack edge-loss CSVs after each member (file-count quota)
 
 echo "host=$(hostname) system=${SYSTEM} dataset=${DATASET} seeds=${SEED_LIST[*]} db=${DB_HOST}:${DB_PORT}"
 echo "extra args: ${EXTRA_ARGS[*]:-<none>}"

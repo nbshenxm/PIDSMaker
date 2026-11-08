@@ -68,7 +68,8 @@ def _list_epochs(edge_losses_dir, split):
     d = os.path.join(edge_losses_dir, split)
     if not os.path.isdir(d):
         return []
-    return sorted(int(x.rsplit("_", 1)[-1]) for x in os.listdir(d) if x.startswith("model_epoch_"))
+    return sorted({int(x.split(".")[0].rsplit("_", 1)[-1]) for x in os.listdir(d)
+                   if x.startswith("model_epoch_") and not x.endswith(".tmp")})
 
 
 def cmd_manifest(argv):
@@ -103,6 +104,10 @@ def cmd_manifest(argv):
     with open(out, "w") as f:
         json.dump(m, f, indent=2)
     print(f"manifest: {out}  (epochs val={len(m['val_epochs'])} test={len(m['test_epochs'])})")
+    if os.environ.get("CALIBER_PACK") == "1":
+        # Collapse per-batch CSVs into one Parquet per (split, epoch): file-count quota.
+        from caliber.pack import pack_task
+        pack_task(cfg.training._task_path)
 
 
 def _artifact_dir(argv):
