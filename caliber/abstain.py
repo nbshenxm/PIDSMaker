@@ -42,9 +42,13 @@ def tie_blocks(S, hour, eps):
 
 
 def replay_abstain(st, idx, keys, B, q0, eta, triggers, unfamiliar, k_ci=2.0, tie_T=20,
-                   tie_eps=None, max_gap_ns=HOUR):
+                   tie_eps=None, max_gap_ns=HOUR, rho=None):
     """Returns decision codes per unit (0 dismiss, 1 alert, 2 abstain) and case flags
-    (unit opened a new case = incident)."""
+    (unit opened a new case = incident).
+
+    rho: abstention share of the budget. At most rho*B new abstention cases per day, served
+    most-uncertain first (smallest |S - q| / sem); candidates beyond the share fall back to the
+    plain threshold (alert if S >= q, else dismiss). None = unlimited."""
     Z = st["Z"][idx]
     S = Z.mean(0)
     sem = Z.std(0) / np.sqrt(Z.shape[0])
@@ -56,12 +60,15 @@ def replay_abstain(st, idx, keys, B, q0, eta, triggers, unfamiliar, k_ci=2.0, ti
     case = np.zeros(len(S), bool)
     last = {}
     q, clock = q0, None
+    day_id, day_abst = None, 0
     bounds = np.flatnonzero(np.diff(w[order])) + 1
     for lo, hi in zip(np.r_[0, bounds], np.r_[bounds, len(order)]):
         ix = order[lo:hi]
         tmax = t[ix].max()
         dt = 0.0 if clock is None else min(max(tmax - clock, 0), max_gap_ns) / DAY
         clock = tmax if clock is None else max(clock, tmax)
+        if int(clock // DAY) != day_id:
+            day_id, day_abst = int(clock // DAY), 0
         s = S[ix]
         above = s >= q
         abst = np.zeros(len(ix), bool)
@@ -73,6 +80,20 @@ def replay_abstain(st, idx, keys, B, q0, eta, triggers, unfamiliar, k_ci=2.0, ti
             abst |= near & (tie_size[ix] >= tie_T)
         if "unfamiliar" in triggers:
             abst |= above & unfamiliar[ix]
+        if rho is not None and abst.any():
+            # serve the abstention share most-uncertain first; overflow -> plain threshold
+            cand = np.flatnonzero(abst)
+            margin = np.abs(s[cand] - q) / np.maximum(sem[ix][cand], 1e-9)
+            cand = cand[np.argsort(margin, kind="stable")]
+            keep = np.zeros(len(ix), bool)
+            for j in cand:
+                kj = keys[ix[j]]
+                open_case = kj in last and t[ix[j]] - last[kj] < HOUR
+                if open_case or day_abst < rho * B:
+                    keep[j] = True
+                    if not open_case:
+                        day_abst += 1
+            abst = keep
         alert = above & ~abst
         dec[ix[alert]] = 1
         dec[ix[abst & (above | ("ci" in triggers) | ("tie" in triggers))]] = 2
@@ -93,7 +114,9 @@ def replay_abstain(st, idx, keys, B, q0, eta, triggers, unfamiliar, k_ci=2.0, ti
     return dec, case
 
 
-def review(st, dec, case, keys, B, tz, lineage_first):
+def review(st, dec, case, keys, B, tz, lineage_first, priority=None):
+    """Analysts review at most B cases/day: FIFO, cases flagged in `priority` first (e.g.
+    unfamiliar entities), then distinct lineages first if lineage_first."""
     days = day_of(st["t1"], tz)
     t, y, node = st["t1"], st["y"], st["node"]
     hour = t // HOUR
@@ -101,6 +124,8 @@ def review(st, dec, case, keys, B, tz, lineage_first):
     for d in np.unique(days):
         ix = np.flatnonzero(case & (days == d))
         ix = ix[np.argsort(t[ix], kind="stable")]
+        if priority is not None:
+            ix = np.r_[ix[priority[ix]], ix[~priority[ix]]]
         if lineage_first:
             first, rest, s_ = [], [], set()
             for i in ix:
@@ -151,10 +176,12 @@ def main():
     else:
         lin = st["node"].astype(np.int64)
     ent = st["node"].astype(np.int64)
-    # unfamiliar: entity label never seen among validation entities (path/name based)
+    # unfamiliar: entity label never seen among validation entities. Labels are normalized
+    # (digits -> '#') so per-PID paths such as /proc/1234/stat match /proc/#/stat.
     unfamiliar = np.zeros(len(ent), bool)
     if meta is not None:
-        path = dict(zip(meta["node"].astype(np.int64), meta["path"].astype(str)))
+        norm = meta["path"].astype(str).str.replace(r"\d+", "#", regex=True)
+        path = dict(zip(meta["node"].astype(np.int64), norm))
         val_nodes = set()
         for m in members[:1]:
             ep = data.select_epoch(m, "min_val_loss", cache)
@@ -165,12 +192,23 @@ def main():
     cal_full = np.nanmean(st["Z_val"], 0)
     tie_eps = 0.01 * (float(np.nanstd(cal_full)) or 1.0)
     halves = {"A": np.arange(0, M // 2), "B": np.arange(M // 2, 2 * (M // 2)), "all": np.arange(M)}
-    policies = {"none": [], "ci": ["ci"], "tie": ["tie"], "unfamiliar": ["unfamiliar"],
-                "lineage": ["lineage"], "combined": ["ci", "tie", "unfamiliar", "lineage"]}
+    # (triggers, abstention share rho, review priority)
+    policies = {
+        "none": ([], None, None),
+        "ci rho=.25": (["ci"], 0.25, None), "ci rho=.5": (["ci"], 0.5, None),
+        "ci unlimited": (["ci"], None, None),
+        "tie rho=.25": (["tie"], 0.25, None),
+        "unfamiliar-abstain rho=.25": (["unfamiliar"], 0.25, None),
+        "unfamiliar-first review": ([], None, "unfamiliar"),
+        "lineage": (["lineage"], None, None),
+        "ci+lineage rho=.25": (["ci", "lineage"], 0.25, None),
+        "ci+lineage rho=.5": (["ci", "lineage"], 0.5, None),
+        "ci+lineage rho=.25 +unfamiliar-first": (["ci", "lineage"], 0.25, "unfamiliar"),
+    }
     print(f"== {args.system}/{args.dataset} M={M} B={B} unfamiliar units={unfamiliar.mean():.3%} "
           f"lineage={'yes' if parents is not None else 'no'}")
     out = {}
-    for name, trig in policies.items():
+    for name, (trig, rho, prio) in policies.items():
         keys = lin if "lineage" in trig else ent
         res = {}
         autos = {}
@@ -179,14 +217,17 @@ def main():
             cal = cal[np.isfinite(cal)]
             k = min(max(int(B * nvd), 1), len(cal))
             q0, eta = float(np.sort(cal)[-k]), 0.02 * (float(np.std(cal)) or 1.0)
-            dec, case = replay_abstain(st, idx, keys, B, q0, eta, trig, unfamiliar, tie_eps=tie_eps)
+            dec, case = replay_abstain(st, idx, keys, B, q0, eta, trig, unfamiliar,
+                                       tie_eps=tie_eps, rho=rho)
             if h == "all":
-                res = review(st, dec, case, keys, B, tz, "lineage" in trig)
-            m = case & (dec == 1)
-            autos[h] = set(zip(ent[m].tolist(), (st["t1"][m] // HOUR).tolist()))
+                res = review(st, dec, case, keys, B, tz, "lineage" in trig,
+                             priority=unfamiliar if prio == "unfamiliar" else None)
+            # agreement on automatic CASES: (key, hour), key = entity or lineage
+            m = (dec == 1)
+            autos[h] = set(zip(keys[m].tolist(), (st["t1"][m] // HOUR).tolist()))
         res["auto_agreement_halves"] = jaccard(autos["A"], autos["B"])
         out[name] = res
-        print(f"  {name:10s} reviewed={res['attack_entities_reviewed']:3d}/{res['attack_entities']} "
+        print(f"  {name:38s} reviewed={res['attack_entities_reviewed']:3d}/{res['attack_entities']} "
               f"(auto {res['attack_entities_auto']}, abstained {res['attack_entities_abstained']}) "
               f"benign cases/day={res['benign_cases_per_day']:6.1f} abstain/day={res['abstain_cases_per_day']:5.1f} "
               f"auto-precision={res['auto_precision']:.3f} auto-agreement(A,B)={res['auto_agreement_halves']:.3f}",
