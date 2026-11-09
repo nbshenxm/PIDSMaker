@@ -39,6 +39,17 @@ def group_manifests(manifests):
     groups = defaultdict(list)
     for m in manifests:
         groups[(m["system"], m["dataset"], m["group"])].append(m)
+    # Guard: two different variants (groups) must never share a training directory.
+    # That would mean a CLI option was silently ignored and a "variant" is really
+    # the default run (this happened once with --holdout_train_day).
+    owner = {}
+    for key, ms in groups.items():
+        for m in ms:
+            p = os.path.normpath(m["training_task_path"])
+            if p in owner and owner[p][0] != key:
+                raise ValueError(f"training dir shared by different variants {owner[p][0]} "
+                                 f"and {key} (seed {m['seed']}): {p}")
+            owner[p] = (key, m["seed"])
     return {k: sorted(v, key=lambda m: m["seed"]) for k, v in groups.items()}
 
 
