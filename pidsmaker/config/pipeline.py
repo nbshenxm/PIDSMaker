@@ -68,6 +68,12 @@ def get_default_cfg(args):
         args.model,
         args.dataset,
     )
+    # CALIBER: per-member weight folders (state_dict.pkl + word2vec.model) for frozen scoring
+    if getattr(args, "weights_dir", ""):
+        cfg._from_weights_path = os.path.abspath(args.weights_dir)
+    # CALIBER: realizable test-time adversarial transform (JSON spec, see caliber_adversary.py).
+    # Enters the construction hash only when set, so default artifacts are unaffected.
+    cfg._adversary = getattr(args, "adversary", "") or ""
 
     cfg._restart_from_scratch = args.restart_from_scratch
     if cfg._restart_from_scratch:
@@ -197,6 +203,10 @@ def get_runtime_required_args(return_unknown_args=False, args=None):
     parser.add_argument('--from_weights', action="store_true", help="Whether to load from pkl weights")
     parser.add_argument('--save_weights', action="store_true",
                         help="CALIBER: save per-epoch model weights (white-box adversarial studies)")
+    parser.add_argument('--weights_dir', default="",
+                        help="CALIBER: folder with state_dict.pkl and word2vec.model for --from_weights")
+    parser.add_argument('--adversary', default="",
+                        help="CALIBER: JSON spec of a test-time adversarial transform")
     parser.add_argument(
         "--holdout_train_day", default="",
         help="CALIBER leave-one-day-out: move this training date into the validation split.",
@@ -321,6 +331,8 @@ def set_task_paths(cfg, subtask_concat_value=None):
 
         if task == "construction":  # to restart from beginning if train dates are changed
             restart_values += cfg.dataset.train_dates
+            if getattr(cfg, "_adversary", ""):  # CALIBER: only when an adversary is set
+                restart_values += ["adversary=" + cfg._adversary.replace(" ", "")]
             if (
                 cfg._restart_from_scratch
             ):  # to start from a brand new folder, we generate a random id to add to the hash

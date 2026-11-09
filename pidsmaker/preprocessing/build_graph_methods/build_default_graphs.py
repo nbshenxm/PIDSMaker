@@ -346,6 +346,11 @@ def gen_edge_fused_tw(indexid2msg, cfg):
                         if row[2] in include_edge_type:
                             filtered.append(row)
 
+                    # CALIBER: test-date adversarial event transforms (no-op unless set)
+                    if getattr(cfg, "_adv_ctx", None) is not None:
+                        from pidsmaker import caliber_adversary
+                        filtered = caliber_adversary.transform(cfg, filtered, date)
+
                     # On the last DB chunk also append mimicry events, matching
                     # the original events_list ordering (real events then mimicry).
                     if db_done:
@@ -557,6 +562,11 @@ def main(cfg):
     log_start(__file__)
 
     indexid2msg = compute_indexid2msg(cfg=cfg)
+
+    # CALIBER: realizable test-time adversarial transforms (no-op unless --adversary is set).
+    # Renaming changes the label table, so the transformed table is also what gets saved.
+    from pidsmaker import caliber_adversary
+    indexid2msg, cfg._adv_ctx = caliber_adversary.prepare(cfg, indexid2msg)
 
     gen_edge_fused_tw(indexid2msg=indexid2msg, cfg=cfg)
 

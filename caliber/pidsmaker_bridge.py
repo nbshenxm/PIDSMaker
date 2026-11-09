@@ -23,7 +23,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 
-MACHINE_ARGS = {"--artifact_dir", "--database_host", "--database_port",
+MACHINE_ARGS = {"--artifact_dir", "--database_host", "--database_port", "--weights_dir",
                 "--database_user", "--database_password"}
 SEED_ARGS = {"--training.seed"}
 
