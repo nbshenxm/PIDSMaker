@@ -41,7 +41,11 @@ def wilson_lower(pos, n, conf=0.9):
 
 
 def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
-                 max_gap_ns=HOUR, window_audits=50):
+                 max_gap_ns=HOUR, window_audits=50, B_auto=None):
+    """B_auto: if set, q_act is driven by a false-automation budget instead of a precision
+    target: at most ~B_auto benign cases per day may be acted on automatically. Same
+    label-free controller as the review budget (Proposition 1): every new tier-A case counts
+    immediately and confirmed attacks are refunded. No audit sample is needed for control."""
     order = np.lexsort((t, w))
     case_of = np.full(len(S), -1, np.int64)        # case index per alerted unit
     cases = []                                     # dicts: key, hour, tier, audited
@@ -54,7 +58,7 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
         tmax = t[ix].max()
         dt = 0.0 if clock is None else min(max(tmax - clock, 0), max_gap_ns) / DAY
         clock = tmax if clock is None else max(clock, tmax)
-        n_rev, n_att_rev = 0, 0
+        n_rev, n_att_rev, n_auto, n_att_auto = 0, 0, 0, 0
         for i in ix[S[ix] >= q_rev]:
             kh = (keys[i], int(t[i] // HOUR))
             c = open_case.get(kh)
@@ -67,6 +71,9 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
                 if tier == "B" or aud:
                     n_rev += 1
                     n_att_rev += int(y[i])
+                if tier == "A":
+                    n_auto += 1
+                    n_att_auto += int(y[i])
                 if aud:
                     audits.append(bool(y[i]))
                     audits[:] = audits[-window_audits:]
@@ -75,8 +82,11 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
             case_of[i] = c
         # review budget (tier B + audits); confirmed attacks refunded
         q_rev += eta * (n_rev - n_att_rev - B * dt)
+        if B_auto is not None:
+            # false-automation budget: same controller as the review budget
+            q_act += eta_act * (n_auto - n_att_auto - B_auto * dt)
         # automation threshold: meet the precision target on audited tier-A cases
-        if len(audits) >= 10:
+        elif len(audits) >= 10:
             lb = wilson_lower(sum(audits), len(audits))
             if lb < pi:
                 q_act += eta_act
@@ -154,18 +164,21 @@ def main():
         q0 = float(np.sort(cal)[-k])
         sd = float(np.std(cal)) or 1.0
         q_act0 = float(np.sort(cal)[-max(k // 10, 1)])
-        # baseline: all alerts to triage (automation disabled: pi = 1.01 -> q_act -> inf)
-        for pi in [None, 0.3, 0.5, 0.8]:
-            for audit in ([0.05] if pi is None else [0.02, 0.05, 0.1]):
+        # baseline: all alerts to triage (no automation); then false-automation budgets
+        for b_auto in [None, 0.25, 0.5, 1.0, 2.0]:
+            for audit in [0.05]:
                 rng = np.random.default_rng(0)
                 case_of, cases = replay_tiers(
                     S, st["t1"], st["w"], st["y"], lin, B, q0, 0.02 * sd,
-                    pi if pi is not None else 2.0, audit if pi is not None else 0.0,
-                    0.05 * sd, q_act0 if pi is not None else np.inf, rng)
+                    2.0, audit if b_auto is not None else 0.0,
+                    0.02 * sd, q_act0 if b_auto is not None else np.inf, rng, B_auto=b_auto)
                 r = evaluate(st, case_of, cases, B, tz)
-                tag = f"{score_name} " + ("all-to-triage" if pi is None else f"pi={pi} audit={audit}")
+                fa = [c for c in cases if c["tier"] == "A" and not c["y"]]
+                nd = max(len(np.unique(day_of(st["t1"], tz))), 1)
+                r["false_automations_per_day"] = len(fa) / nd
+                tag = f"{score_name} " + ("all-to-triage" if b_auto is None else f"B_auto={b_auto}")
                 out[tag] = r
-                print(f"  {tag:34s} analyst/day={r['analyst_load_per_day']:6.1f} "
+                print(f"  {tag:24s} false-auto/day={r.get('false_automations_per_day', 0):5.2f} analyst/day={r['analyst_load_per_day']:6.1f} "
                       f"(all-to-triage {r['all_to_triage_load_per_day']:6.1f}) auto share={r['automation_share']:.2f} "
                       f"prec A={r['precision_A']:.2f} B={r['precision_B']:.3f} | attack entities "
                       f"auto={r['attack_entities_automated']} reviewed={r['attack_entities_reviewed']} "
