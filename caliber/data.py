@@ -150,10 +150,10 @@ def select_epoch(manifest, rule="min_val_loss", cache_dir=None):
 def _node_long(df, use_dst=True):
     """One row per (edge endpoint): node, loss, b, time, edge_type."""
     cols = ["loss", "b", "time", "edge_type"]
-    src = df[cols].assign(node=df["srcnode"].values)
+    src = df[cols].assign(node=df["srcnode"].values, partner=df["dstnode"].values)
     if not use_dst:
         return src
-    dst = df[cols].assign(node=df["dstnode"].values)
+    dst = df[cols].assign(node=df["dstnode"].values, partner=df["srcnode"].values)
     return pd.concat([src, dst], ignore_index=True)
 
 

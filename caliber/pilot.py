@@ -133,6 +133,8 @@ def unit_table(df, unit="node", window="batch", topk=5):
     g = long.groupby(["w", "node"])
     ew = pd.DataFrame({"score": g["loss"].max(), "t0": g["time"].min(), "t1": g["time"].max()})
     if unit == "entity_window":
+        # partner = other endpoint of the unit's highest-loss edge (used for lineage keys)
+        ew["partner"] = long.loc[g["loss"].idxmax().values, "partner"].values
         return ew
     if unit == "window":
         gw = ew.groupby(level="w")
