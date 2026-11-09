@@ -48,15 +48,18 @@ def reconcile(artifact_dir, queue, requeue_failed=False):
             if name.startswith("."):
                 continue
             path = os.path.join(d, name)
-            t = read_task(path)
-            argv = task_argv(t, artifact_dir)
-            if is_complete(argv):
-                cmd_manifest(argv)
-                os.replace(path, os.path.join(queue, "done", name))
-                moved_done += 1
-            elif src != "pending":
-                os.replace(path, os.path.join(queue, "pending", name))
-                moved_pending += 1
+            try:
+                t = read_task(path)
+                argv = task_argv(t, artifact_dir)
+                if is_complete(argv):
+                    cmd_manifest(argv)
+                    os.replace(path, os.path.join(queue, "done", name))
+                    moved_done += 1
+                elif src != "pending":
+                    os.replace(path, os.path.join(queue, "pending", name))
+                    moved_pending += 1
+            except FileNotFoundError:
+                continue                     # a worker claimed it meanwhile
     print(f"reconcile: {moved_done} already complete -> done/, {moved_pending} requeued -> pending/")
 
 

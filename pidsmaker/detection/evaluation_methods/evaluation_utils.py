@@ -1234,8 +1234,15 @@ def compute_tw_labels(cfg, losses_dir=None):
         node_to_count = {node: count for node, count in zip(unique_nodes, counts)}
         log(f"TW {tw} -> {len(unique_nodes)} malicious nodes + {len(nodes)} malicious edges")
 
+        # Some ground-truth UUIDs (e.g. mimicry-injected nodes, or nodes absent from the
+        # built graph) have no node id; skip them instead of crashing the evaluation.
+        missing = [n for n in node_to_count if n not in uuid_to_node_id]
+        if missing:
+            log(f"TW {tw}: {len(missing)} malicious UUIDs without a node id skipped")
         node_to_count = {
-            uuid_to_node_id[node_id]: count for node_id, count in node_to_count.items()
+            uuid_to_node_id[node_id]: count
+            for node_id, count in node_to_count.items()
+            if node_id in uuid_to_node_id
         }
         all_malicious_nodes.update(node_to_count.keys())
         # pprint(node_to_count, width=1)
