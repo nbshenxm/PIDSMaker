@@ -264,7 +264,7 @@ def main(cfg):
         # Per-epoch checkpoints are only needed by the visualizer's epoch selector.
         # Opt-in via `--save_for_viz`; otherwise skip — the pipeline evaluates from
         # the in-memory best model and never reloads these from disk.
-        if cfg._save_for_viz:
+        if cfg._save_for_viz or getattr(cfg, "_save_weights", False):
             gnn_models_dir = cfg.training._trained_models_dir
             model_path = os.path.join(gnn_models_dir, f"model_epoch_{epoch}")
             save_model(model, model_path)

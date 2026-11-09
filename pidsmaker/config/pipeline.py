@@ -51,6 +51,9 @@ def get_default_cfg(args):
     # Opt-in: whether to persist the extra (large) artifacts the embedding
     # visualizer needs. Underscore-prefixed so it never enters the task hashes.
     cfg._save_for_viz = getattr(args, "save_for_viz", False)
+    # CALIBER: keep per-epoch weights (for white-box adversarial studies) without the
+    # visualizer's other artifacts. Underscore-prefixed, so not part of task hashes.
+    cfg._save_weights = getattr(args, "save_weights", False)
     cfg._model = args.model
     cfg._tuning_mode = args.tuning_mode
     cfg._experiment = args.experiment
@@ -192,6 +195,8 @@ def get_runtime_required_args(return_unknown_args=False, args=None):
         "--save_graph_preprocessing", action="store_true", help="Saves `graph_preprocessing` task on disk (heavy)."
     )
     parser.add_argument('--from_weights', action="store_true", help="Whether to load from pkl weights")
+    parser.add_argument('--save_weights', action="store_true",
+                        help="CALIBER: save per-epoch model weights (white-box adversarial studies)")
     parser.add_argument(
         "--holdout_train_day", default="",
         help="CALIBER leave-one-day-out: move this training date into the validation split.",
