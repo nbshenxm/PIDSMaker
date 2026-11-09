@@ -56,6 +56,9 @@ def ensemble_stream(members, labels, window="batch", epoch_rule="min_val_loss", 
         "S_val": np.nanmean(np.vstack(zs_val), 0),
         "S": np.vstack(zs_test).mean(0),
         "t1": tt["t1"].values, "w": idx_test.get_level_values("w").values, "y": y,
+        "node": idx_test.get_level_values("node").values,
+        "Z": np.vstack(zs_test),                   # per-member scores (for vote splits)
+        "Z_val": np.vstack(zs_val),
     }
 
 
