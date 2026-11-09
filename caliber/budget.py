@@ -35,7 +35,11 @@ HOUR = 3600 * 10**9
 DAY = 24 * HOUR
 
 
-def replay_budget(S, t, w, y, node, B, q0, eta, delay_ns=0, dedupe_ns=HOUR, fake=None):
+def replay_budget(S, t, w, y, node, B, q0, eta, delay_ns=0, dedupe_ns=HOUR, fake=None,
+                  max_gap_ns=HOUR):
+    """max_gap_ns: elapsed time credited for budget is capped per batch, so gaps in the
+    dataset (e.g. CADETS_E3 test days 04-06 then 04-11) do not release days of unused
+    budget at once. A deployment streams continuously; dataset gaps are artifacts."""
     order = np.lexsort((t, w))
     S, t, w, y, node = S[order], t[order], w[order], y[order], node[order]
     fk = fake[order] if fake is not None else np.zeros(len(S), bool)
@@ -48,7 +52,7 @@ def replay_budget(S, t, w, y, node, B, q0, eta, delay_ns=0, dedupe_ns=HOUR, fake
     clock = None
     for lo, hi in zip(np.r_[0, bounds], np.r_[bounds, len(S)]):
         tmax = t[lo:hi].max()
-        dt = 0.0 if clock is None else max(tmax - clock, 0) / DAY
+        dt = 0.0 if clock is None else min(max(tmax - clock, 0), max_gap_ns) / DAY
         clock = tmax if clock is None else max(clock, tmax)
         while refunds and refunds[0][0] <= clock:
             q -= eta * refunds.popleft()[1]
@@ -126,14 +130,22 @@ def main():
     tz = labels.get("timezone", "US/Eastern")
     cal = st["S_val"][np.isfinite(st["S_val"])]
     sd = float(np.std(cal)) or 1.0
-    q0 = float(np.quantile(cal, 0.999))
+    n_val_days = max(len(members[0].get("val_dates", [])), 1)
     high = float(np.max(cal)) * 2 + 1
     res = {}
 
-    def go(tag, B, stx=st, fake=None, **kw):
+    def warm_start(B, cold=False):
+        """Threshold that would have produced ~B alerts/day on the validation day(s).
+        Ignores dedupe (alerts on validation are mostly distinct entities)."""
+        if cold:
+            return float(np.quantile(cal, 0.999))
+        k = min(max(int(B * n_val_days), 1), len(cal))
+        return float(np.sort(cal)[-k])
+
+    def go(tag, B, stx=st, fake=None, cold=False, **kw):
         days = day_of(stx["t1"], tz)
-        f, inc = replay_budget(stx["S"], stx["t1"], stx["w"], stx["y"], stx["node"], B, q0,
-                               kw.pop("eta", 0.02 * sd), fake=fake, **kw)
+        f, inc = replay_budget(stx["S"], stx["t1"], stx["w"], stx["y"], stx["node"], B,
+                               warm_start(B, cold), kw.pop("eta", 0.02 * sd), fake=fake, **kw)
         real = ~fake if fake is not None else np.ones(len(f), bool)
         s = summarize(f[real], inc[real], stx["y"][real], stx["node"][real], days[real], B)
         res[tag] = s
@@ -144,6 +156,8 @@ def main():
     print(f"== {args.system}/{args.dataset} units={len(st['S'])}")
     for B in [10, 50, 200]:
         go(f"B={B}", B)
+    go("B=50 cold-start", 50, cold=True)
+    go("B=50 no-gap-cap", 50, max_gap_ns=10**18)
     for d in [1, 24]:
         go(f"B=50 delay={d}h", 50, delay_ns=d * HOUR)
     for e in [0.005, 0.1]:
