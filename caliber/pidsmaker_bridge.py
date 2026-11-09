@@ -166,13 +166,49 @@ def cmd_labels(argv):
     print(f"node_meta: {len(meta)} nodes -> {out_dir}")
 
 
+PROCESS_CREATION_OPS = ("EVENT_FORK", "EVENT_CLONE")
+
+
+def cmd_lineage(argv):
+    """Export the process tree (child -> parent, first creation event) from the raw events.
+
+    PIDSMaker's graphs drop process-creation events (they are not in its edge vocabulary), so
+    the lineage must come from the database. Written to
+    {artifact_dir}/caliber/labels/<dataset>__lineage.csv.gz with columns child,parent,time."""
+    from pidsmaker.utils.utils import init_database_connection
+
+    cfg = load_cfg(argv)
+    dataset = argv[1]
+    cur, conn = init_database_connection(cfg)
+    cur.execute(
+        "SELECT dst_index_id, src_index_id, MIN(timestamp_rec) FROM event_table "
+        "WHERE operation IN %s AND src_index_id <> dst_index_id "
+        "GROUP BY dst_index_id, src_index_id", (PROCESS_CREATION_OPS,))
+    rows = cur.fetchall()
+    # keep the earliest creation event per child
+    first = {}
+    for child, parent, t in rows:
+        child, parent, t = int(child), int(parent), int(t)
+        if child not in first or t < first[child][1]:
+            first[child] = (parent, t)
+    out_dir = os.path.join(_artifact_dir(argv), "caliber", "labels")
+    os.makedirs(out_dir, exist_ok=True)
+    out = os.path.join(out_dir, f"{dataset}__lineage.csv.gz")
+    with gzip.open(out, "wt", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["child", "parent", "time"])
+        for child, (parent, t) in first.items():
+            w.writerow([child, parent, t])
+    print(f"lineage: {len(first)} child->parent links ({len(rows)} creation pairs) -> {out}")
+
+
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("command", choices=["manifest", "labels"])
+    p.add_argument("command", choices=["manifest", "labels", "lineage"])
     ns, rest = p.parse_known_args()
     if len(rest) < 2:
         sys.exit("usage: python -m caliber.pidsmaker_bridge {manifest,labels} SYSTEM DATASET [args...]")
-    {"manifest": cmd_manifest, "labels": cmd_labels}[ns.command](rest)
+    {"manifest": cmd_manifest, "labels": cmd_labels, "lineage": cmd_lineage}[ns.command](rest)
 
 
 if __name__ == "__main__":
