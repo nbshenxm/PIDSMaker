@@ -36,10 +36,16 @@ DAY = 24 * HOUR
 
 
 def replay_budget(S, t, w, y, node, B, q0, eta, delay_ns=0, dedupe_ns=HOUR, fake=None,
-                  max_gap_ns=HOUR):
+                  max_gap_ns=HOUR, eta_scale=None, window_units=50000):
     """max_gap_ns: elapsed time credited for budget is capped per batch, so gaps in the
     dataset (e.g. CADETS_E3 test days 04-06 then 04-11) do not release days of unused
-    budget at once. A deployment streams continuously; dataset gaps are artifacts."""
+    budget at once. A deployment streams continuously; dataset gaps are artifacts.
+
+    eta_scale: if set, the step is scale-free: eta_t = eta_scale * spread of the most
+    recent `window_units` scores (99.9th percentile minus median), instead of a constant
+    tied to the validation day. The controller then moves in units of the current score
+    distribution, so a test period whose scores sit far from the validation day is
+    tracked as quickly as one that does not."""
     order = np.lexsort((t, w))
     S, t, w, y, node = S[order], t[order], w[order], y[order], node[order]
     fk = fake[order] if fake is not None else np.zeros(len(S), bool)
@@ -48,12 +54,21 @@ def replay_budget(S, t, w, y, node, B, q0, eta, delay_ns=0, dedupe_ns=HOUR, fake
     last_alert = {}                       # entity -> time of its incident start
     q = q0
     refunds = deque()
+    recent, n_recent = deque(), 0
     bounds = np.flatnonzero(np.diff(w)) + 1
     clock = None
     for lo, hi in zip(np.r_[0, bounds], np.r_[bounds, len(S)]):
         tmax = t[lo:hi].max()
         dt = 0.0 if clock is None else min(max(tmax - clock, 0), max_gap_ns) / DAY
         clock = tmax if clock is None else max(clock, tmax)
+        if eta_scale is not None:
+            recent.append(S[lo:hi])
+            n_recent += hi - lo
+            while n_recent - len(recent[0]) >= window_units:
+                n_recent -= len(recent.popleft())
+            r = np.concatenate(recent)
+            spread = float(np.quantile(r, 0.999) - np.median(r))
+            eta = eta_scale * (spread if spread > 0 else 1.0)
         while refunds and refunds[0][0] <= clock:
             q -= eta * refunds.popleft()[1]
         f = S[lo:hi] >= q
@@ -121,6 +136,8 @@ def main():
     ap.add_argument("--system", required=True)
     ap.add_argument("--dataset", required=True)
     ap.add_argument("--group", default="da39a3ee5e")
+    ap.add_argument("--only_adaptive", action="store_true",
+                    help="compare fixed vs scale-free (adaptive) step only")
     args = ap.parse_args()
     cache = os.path.join(args.artifact_dir, "caliber", "cache")
     members = data.group_manifests(data.load_manifests(
@@ -154,6 +171,18 @@ def main():
               f"attack entities hit {s['attack_entities_hit']}/{s['attack_entities']}")
 
     print(f"== {args.system}/{args.dataset} units={len(st['S'])}")
+    if args.only_adaptive:
+        for B in [10, 50, 200]:
+            go(f"B={B} fixed-eta", B)
+            for c in [0.005, 0.02, 0.05]:
+                go(f"B={B} adaptive-eta c={c}", B, eta_scale=c)
+        for d in [1, 24]:
+            go(f"B=50 adaptive c=0.02 delay={d}h", 50, eta_scale=0.02, delay_ns=d * HOUR)
+        for rate, k in [(1000, 10), (1000, 100)]:
+            stf, fake = flood(st, labels, rate, 6, k, high)
+            go(f"B=50 adaptive c=0.02 flood {rate}/h x6h from {k}", 50, stx=stf, fake=fake,
+               eta_scale=0.02)
+        return
     for B in [10, 50, 200]:
         go(f"B={B}", B)
     go("B=50 cold-start", 50, cold=True)
