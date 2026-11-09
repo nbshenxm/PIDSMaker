@@ -57,8 +57,9 @@ def calibrate_rise_rate(S_val, t_val, B, window_h=6, factor=2.0):
 
 def replay_budget(S, t, w, y, node, B, q0, eta, delay_ns=0, dedupe_ns=HOUR, fake=None,
                   max_gap_ns=HOUR, eta_scale=None, window_units=50000, spread_stat="tail",
-                  rise_rate_per_hour=None, std_window=None, std_init=None):
-    """Incident-budget controller replay. Returns (alert flags, new-incident flags).
+                  rise_rate_per_hour=None, std_window=None, std_init=None, return_q=False):
+    """Incident-budget controller replay. Returns (alert flags, new-incident flags), plus the
+    threshold in force for each unit if return_q.
 
     max_gap_ns: elapsed time credited for budget is capped per batch, so gaps in the dataset
         (e.g. CADETS_E3 test days 04-06 then 04-11) do not release days of unused budget.
@@ -77,6 +78,7 @@ def replay_budget(S, t, w, y, node, B, q0, eta, delay_ns=0, dedupe_ns=HOUR, fake
     fk = fake[order] if fake is not None else np.zeros(len(S), bool)
     flags = np.zeros(len(S), bool)
     new_inc = np.zeros(len(S), bool)
+    q_at = np.zeros(len(S))
     last_alert = {}                       # entity -> time of its incident start
     q = q0
     refunds = deque()
@@ -120,6 +122,7 @@ def replay_budget(S, t, w, y, node, B, q0, eta, delay_ns=0, dedupe_ns=HOUR, fake
                 n_hist -= len(hist.popleft())
         else:
             s_eval = s_b
+        q_at[lo:hi] = q
         f = s_eval >= q
         flags[lo:hi] = f
         n_new, n_new_attack = 0, 0
@@ -141,6 +144,8 @@ def replay_budget(S, t, w, y, node, B, q0, eta, delay_ns=0, dedupe_ns=HOUR, fake
             refunds.append((clock + delay_ns, n_new_attack))
     inv = np.empty_like(order)
     inv[order] = np.arange(len(order))
+    if return_q:
+        return flags[inv], new_inc[inv], q_at[inv]
     return flags[inv], new_inc[inv]
 
 
