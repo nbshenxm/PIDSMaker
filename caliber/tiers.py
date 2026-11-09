@@ -1,0 +1,180 @@
+"""Controlled automation: three-tier decisions with operator targets.
+
+  tier A  automate-act   S >= q_act      handled without analysts (e.g. automatic enrichment,
+                                         containment, ticketing); operator sets a precision
+                                         target pi for these cases
+  tier B  abstain-review q_rev <= S < q_act   analyst queue; the budget controller keeps
+                                         tier-B cases + audits at ~B per day (Proposition 1)
+  tier C  automate-dismiss S < q_rev
+
+The automated tiers stay controllable without attack labels through AUDIT SAMPLING: each
+new tier-A case is sent to an analyst with probability a; audited verdicts give an unbiased
+precision estimate, and q_act moves until the lower confidence bound of tier-A precision meets
+pi. Audits count against the analyst budget, so analysts never see more than ~B cases/day.
+
+Cases are (key, hour) with key = provenance lineage when available (else entity).
+
+Compared against "all alerts to triage" (every case with S >= q_rev goes to an analyst):
+analyst load, automation share, realized tier-A precision vs pi, and attack entities handled
+(automated in A, or reviewed in B within capacity).
+
+  python -m caliber.tiers --artifact_dir A --system velox --dataset CADETS_E3
+"""
+
+import argparse
+import json
+import os
+
+import numpy as np
+from scipy.stats import beta
+
+from caliber import data
+from caliber.budget import DAY, HOUR
+from caliber.lineage import lineage_keys, load_parents, process_predicate
+from caliber.online import day_of, ensemble_stream
+
+
+def wilson_lower(pos, n, conf=0.9):
+    if n == 0:
+        return 0.0
+    return float(beta.ppf(1 - conf, pos + 0.5, n - pos + 0.5))      # Jeffreys interval
+
+
+def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
+                 max_gap_ns=HOUR, window_audits=50):
+    order = np.lexsort((t, w))
+    case_of = np.full(len(S), -1, np.int64)        # case index per alerted unit
+    cases = []                                     # dicts: key, hour, tier, audited
+    open_case = {}
+    q_rev, q_act, clock = q0, max(q_act0, q0), None
+    audits = []                                    # recent audited tier-A verdicts
+    bounds = np.flatnonzero(np.diff(w[order])) + 1
+    for lo, hi in zip(np.r_[0, bounds], np.r_[bounds, len(order)]):
+        ix = order[lo:hi]
+        tmax = t[ix].max()
+        dt = 0.0 if clock is None else min(max(tmax - clock, 0), max_gap_ns) / DAY
+        clock = tmax if clock is None else max(clock, tmax)
+        n_rev, n_att_rev = 0, 0
+        for i in ix[S[ix] >= q_rev]:
+            kh = (keys[i], int(t[i] // HOUR))
+            c = open_case.get(kh)
+            if c is None:
+                tier = "A" if S[i] >= q_act else "B"
+                aud = tier == "A" and rng.random() < audit
+                cases.append({"tier": tier, "audited": aud, "y": bool(y[i])})
+                c = len(cases) - 1
+                open_case[kh] = c
+                if tier == "B" or aud:
+                    n_rev += 1
+                    n_att_rev += int(y[i])
+                if aud:
+                    audits.append(bool(y[i]))
+                    audits[:] = audits[-window_audits:]
+            else:
+                cases[c]["y"] = cases[c]["y"] or bool(y[i])
+            case_of[i] = c
+        # review budget (tier B + audits); confirmed attacks refunded
+        q_rev += eta * (n_rev - n_att_rev - B * dt)
+        # automation threshold: meet the precision target on audited tier-A cases
+        if len(audits) >= 10:
+            lb = wilson_lower(sum(audits), len(audits))
+            if lb < pi:
+                q_act += eta_act
+            elif lb > pi + 0.1:
+                q_act -= 0.25 * eta_act
+        q_act = max(q_act, q_rev)
+    return case_of, cases
+
+
+def evaluate(st, case_of, cases, B, tz):
+    y, node, t = st["y"], st["node"], st["t1"]
+    days = day_of(t, tz)
+    nd = max(len(np.unique(days)), 1)
+    tierA = np.array([c["tier"] == "A" for c in cases])
+    ylab = np.array([c["y"] for c in cases])
+    aud = np.array([c["audited"] for c in cases])
+    nA, nB = int(tierA.sum()), int((~tierA).sum())
+    # attack entities: automated (in a tier-A case) or reviewed (tier-B case within capacity)
+    att_units = np.flatnonzero((case_of >= 0) & y)
+    auto_ent = {node[i] for i in att_units if tierA[case_of[i]]}
+    # analyst capacity: first B tier-B/audit cases per day (FIFO by opening time)
+    first_t = {}
+    for i in np.flatnonzero(case_of >= 0):
+        c = case_of[i]
+        first_t[c] = min(first_t.get(c, t[i]), t[i])
+    rev_cases = [c for c in range(len(cases)) if (not tierA[c]) or aud[c]]
+    by_day = {}
+    for c in rev_cases:
+        d = day_of(np.array([first_t[c]]), tz)[0]
+        by_day.setdefault(d, []).append(c)
+    reviewed = set()
+    for d, cs in by_day.items():
+        reviewed |= set(sorted(cs, key=lambda c: first_t[c])[: int(B)])
+    rev_ent = {node[i] for i in att_units if case_of[i] in reviewed}
+    return {
+        "cases_A_per_day": nA / nd, "cases_B_per_day": nB / nd, "audits_per_day": float(aud.sum()) / nd,
+        "analyst_load_per_day": (nB + float(aud.sum())) / nd,
+        "all_to_triage_load_per_day": (nA + nB) / nd,
+        "automation_share": nA / max(nA + nB, 1),
+        "precision_A": float(ylab[tierA].mean()) if nA else float("nan"),
+        "precision_B": float(ylab[~tierA].mean()) if nB else float("nan"),
+        "attack_entities_automated": len(auto_ent),
+        "attack_entities_reviewed": len(rev_ent - auto_ent),
+        "attack_entities_handled": len(auto_ent | rev_ent),
+        "attack_entities": len(set(node[y])),
+    }
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--artifact_dir", required=True)
+    ap.add_argument("--system", required=True)
+    ap.add_argument("--dataset", required=True)
+    ap.add_argument("--group", default="da39a3ee5e")
+    ap.add_argument("--budget", type=float, default=50)
+    args = ap.parse_args()
+    cache = os.path.join(args.artifact_dir, "caliber", "cache")
+    members = data.group_manifests(data.load_manifests(
+        args.artifact_dir, args.system, args.dataset, args.group))[(args.system, args.dataset, args.group)]
+    labels, meta = data.labels_for(members[0], args.artifact_dir)
+    st = ensemble_stream(members, labels, cache_dir=cache)
+    tz = labels.get("timezone", "US/Eastern")
+    B = args.budget
+    parents = load_parents(args.artifact_dir, args.dataset)
+    lin = (lineage_keys(st["node"], st["partner"], parents, process_predicate(parents, meta), 1)
+           if parents is not None else st["node"].astype(np.int64))
+    nvd = max(len(members[0].get("val_dates", [])), 1)
+    out = {}
+    print(f"== {args.system}/{args.dataset} B={B} lineage={'yes' if parents is not None else 'no'}")
+    for score_name in ["ensemble", "single_run"]:
+        S = st["S"] if score_name == "ensemble" else st["Z"][0]
+        cal = (st["S_val"] if score_name == "ensemble" else st["Z_val"][0])
+        cal = cal[np.isfinite(cal)]
+        k = min(max(int(B * nvd), 1), len(cal))
+        q0 = float(np.sort(cal)[-k])
+        sd = float(np.std(cal)) or 1.0
+        q_act0 = float(np.sort(cal)[-max(k // 10, 1)])
+        # baseline: all alerts to triage (automation disabled: pi = 1.01 -> q_act -> inf)
+        for pi in [None, 0.3, 0.5, 0.8]:
+            for audit in ([0.05] if pi is None else [0.02, 0.05, 0.1]):
+                rng = np.random.default_rng(0)
+                case_of, cases = replay_tiers(
+                    S, st["t1"], st["w"], st["y"], lin, B, q0, 0.02 * sd,
+                    pi if pi is not None else 2.0, audit if pi is not None else 0.0,
+                    0.05 * sd, q_act0 if pi is not None else np.inf, rng)
+                r = evaluate(st, case_of, cases, B, tz)
+                tag = f"{score_name} " + ("all-to-triage" if pi is None else f"pi={pi} audit={audit}")
+                out[tag] = r
+                print(f"  {tag:34s} analyst/day={r['analyst_load_per_day']:6.1f} "
+                      f"(all-to-triage {r['all_to_triage_load_per_day']:6.1f}) auto share={r['automation_share']:.2f} "
+                      f"prec A={r['precision_A']:.2f} B={r['precision_B']:.3f} | attack entities "
+                      f"auto={r['attack_entities_automated']} reviewed={r['attack_entities_reviewed']} "
+                      f"handled={r['attack_entities_handled']}/{r['attack_entities']}", flush=True)
+    rep = os.path.join(args.artifact_dir, "caliber", "reports")
+    with open(os.path.join(rep, f"tiers_{args.system}_{args.dataset}_{args.group}_B{int(B)}.json"),
+              "w", encoding="utf-8") as fh:
+        json.dump(out, fh, indent=1)
+
+
+if __name__ == "__main__":
+    main()
