@@ -125,7 +125,7 @@ def main():
     cache = os.path.join(args.artifact_dir, "caliber", "cache")
     members = data.group_manifests(data.load_manifests(
         args.artifact_dir, args.system, args.dataset, args.group))[(args.system, args.dataset, args.group)]
-    labels, _ = data.load_labels(args.artifact_dir, args.dataset, members[0]["ground_truth_version"])
+    labels, _ = data.labels_for(members[0], args.artifact_dir)
     st = ensemble_stream(members, labels, cache_dir=cache)
     tz = labels.get("timezone", "US/Eastern")
     cal = st["S_val"][np.isfinite(st["S_val"])]

@@ -129,7 +129,7 @@ def main():
     for key, members in sorted(groups.items()):
         if len(members) < args.min_members:
             continue
-        labels, _ = data.load_labels(args.artifact_dir, key[1], members[0]["ground_truth_version"])
+        labels, _ = data.labels_for(members[0], args.artifact_dir)
         st = ensemble_stream(members, labels, cache_dir=cache)
         days = day_of(st["t1"], labels.get("timezone", "US/Eastern"))
         cal = st["S_val"][np.isfinite(st["S_val"])]

@@ -90,6 +90,7 @@ def cmd_manifest(argv):
         "val_epochs": _list_epochs(edge_dir, "val"),
         "test_epochs": _list_epochs(edge_dir, "test"),
         "ground_truth_version": str(cfg.evaluation.ground_truth_version),
+        "mimicry_edge_num": int(cfg.construction.mimicry_edge_num or 0),
         "threshold_method": str(cfg.evaluation.node_evaluation.threshold_method),
         "train_dates": list(cfg.dataset.train_dates),
         "val_dates": list(cfg.dataset.val_dates),
@@ -126,7 +127,9 @@ def cmd_labels(argv):
     cfg = load_cfg(argv)
     dataset = argv[1]
     gt_version = str(cfg.evaluation.ground_truth_version)
-    out_dir = os.path.join(_artifact_dir(argv), "caliber", "labels", f"{dataset}__{gt_version}")
+    from caliber.data import labels_key
+    out_dir = os.path.join(_artifact_dir(argv), "caliber", "labels",
+                           labels_key(dataset, gt_version, cfg.construction.mimicry_edge_num or 0))
     os.makedirs(out_dir, exist_ok=True)
 
     attacks = get_GP_of_each_attack(cfg)

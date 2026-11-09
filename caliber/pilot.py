@@ -361,7 +361,7 @@ def main():
             print(f"skip {key}: only {len(members)} members")
             continue
         print(f"== {key}: {len(members)} members")
-        labels, _ = data.load_labels(args.artifact_dir, key[1], members[0]["ground_truth_version"])
+        labels, _ = data.labels_for(members[0], args.artifact_dir)
         res, arrays = analyse_group(members, labels, args.epoch_rule, cache, norm=args.norm,
                                     unit=args.unit, window=args.window)
         tag = f"{args.unit}-{args.window}_{args.epoch_rule}_{args.norm}"

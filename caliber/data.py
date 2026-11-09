@@ -53,8 +53,21 @@ def group_manifests(manifests):
     return {k: sorted(v, key=lambda m: m["seed"]) for k, v in groups.items()}
 
 
-def load_labels(artifact_dir, dataset, gt_version):
-    d = os.path.join(artifact_dir, "caliber", "labels", f"{dataset}__{gt_version}")
+def labels_key(dataset, gt_version, mimicry_edge_num=0):
+    """Directory name of a label export. Mimicry runs add injected nodes to the ground
+    truth, so they get their own export per mimicry level."""
+    key = f"{dataset}__{gt_version}"
+    return key + (f"__mim{int(mimicry_edge_num)}" if mimicry_edge_num else "")
+
+
+def labels_for(manifest, artifact_dir):
+    """Labels matching a member's configuration."""
+    return load_labels(artifact_dir, manifest["dataset"], manifest["ground_truth_version"],
+                       manifest.get("mimicry_edge_num") or 0)
+
+
+def load_labels(artifact_dir, dataset, gt_version, mimicry_edge_num=0):
+    d = os.path.join(artifact_dir, "caliber", "labels", labels_key(dataset, gt_version, mimicry_edge_num))
     with open(os.path.join(d, "labels.json"), encoding="utf-8") as f:
         labels = json.load(f)
     meta_path = os.path.join(d, "node_meta.csv.gz")
