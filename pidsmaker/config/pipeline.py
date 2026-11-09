@@ -178,6 +178,10 @@ def get_runtime_required_args(return_unknown_args=False, args=None):
     )
     parser.add_argument('--from_weights', action="store_true", help="Whether to load from pkl weights")
     parser.add_argument(
+        "--holdout_train_day", default="",
+        help="CALIBER leave-one-day-out: move this training date into the validation split.",
+    )
+    parser.add_argument(
         "--test_mode",
         action="store_true",
         help="Whether to run the framework as in functional tests.",
@@ -592,6 +596,17 @@ def get_yml_cfg(args):
 
     # Overwrites args to the cfg
     overwrite_cfg_with_args(cfg, args)
+
+    # CALIBER: leave-one-day-out. Move one benign training day into the validation
+    # split so this member scores it out-of-sample. train_dates is part of the
+    # construction hash, so each held-out day gets its own artifact paths.
+    holdout = getattr(args, "holdout_train_day", "")
+    if holdout:
+        if holdout not in cfg.dataset.train_dates:
+            raise ValueError(f"--holdout_train_day {holdout} is not a training day of "
+                             f"{cfg.dataset.name}: {cfg.dataset.train_dates}")
+        cfg.dataset.train_dates = [d for d in cfg.dataset.train_dates if d != holdout]
+        cfg.dataset.val_dates = sorted(list(cfg.dataset.val_dates) + [holdout])
 
     # Here we create some variables based on parameters for easier usage
     set_shortcut_variables(cfg)
