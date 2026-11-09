@@ -57,23 +57,21 @@ def calibrate_rise_rate(S_val, t_val, B, window_h=6, factor=2.0):
 
 def replay_budget(S, t, w, y, node, B, q0, eta, delay_ns=0, dedupe_ns=HOUR, fake=None,
                   max_gap_ns=HOUR, eta_scale=None, window_units=50000, spread_stat="tail",
-                  rise_rate_per_hour=None):
-    """rise_rate_per_hour: if set, upward threshold moves are limited to this many score units
-    per hour of credited time (allowance refilled continuously, capped at one hour's worth);
-    downward moves are not limited. See calibrate_rise_rate.
+                  rise_rate_per_hour=None, std_window=None, std_init=None):
+    """Incident-budget controller replay. Returns (alert flags, new-incident flags).
 
-    spread_stat: statistic for the adaptive step: "tail" (99.9th percentile - median) or "mad"
-    (1.4826 x median absolute deviation, 50% breakdown: a minority of attacker-chosen scores
-    cannot inflate it)."""
-    """max_gap_ns: elapsed time credited for budget is capped per batch, so gaps in the
-    dataset (e.g. CADETS_E3 test days 04-06 then 04-11) do not release days of unused
-    budget at once. A deployment streams continuously; dataset gaps are artifacts.
-
-    eta_scale: if set, the step is scale-free: eta_t = eta_scale * spread of the most
-    recent `window_units` scores (99.9th percentile minus median), instead of a constant
-    tied to the validation day. The controller then moves in units of the current score
-    distribution, so a test period whose scores sit far from the validation day is
-    tracked as quickly as one that does not."""
+    max_gap_ns: elapsed time credited for budget is capped per batch, so gaps in the dataset
+        (e.g. CADETS_E3 test days 04-06 then 04-11) do not release days of unused budget.
+    eta_scale / spread_stat: scale-free step, eta_t = eta_scale * spread of the most recent
+        `window_units` scores; "tail" = 99.9th pct - median, "mad" = 1.4826 x MAD.
+    rise_rate_per_hour: upward threshold moves limited to this many score units per hour of
+        credited time (downward moves unlimited). See calibrate_rise_rate.
+    std_window / std_init: online robust standardization. Each batch's scores are standardized
+        by the median and 1.4826*MAD of the previous `std_window` units (std_init = (median,
+        mad) of the validation scores until enough history exists), and the threshold q lives
+        in standardized units. A shift of the bulk of the score distribution is absorbed
+        immediately, while a minority of attacker-generated scores (an alert flood) cannot
+        move a median or a MAD (50% breakdown point)."""
     order = np.lexsort((t, w))
     S, t, w, y, node = S[order], t[order], w[order], y[order], node[order]
     fk = fake[order] if fake is not None else np.zeros(len(S), bool)
@@ -83,6 +81,8 @@ def replay_budget(S, t, w, y, node, B, q0, eta, delay_ns=0, dedupe_ns=HOUR, fake
     q = q0
     refunds = deque()
     recent, n_recent = deque(), 0
+    hist, n_hist = deque(), 0
+    loc, scale = std_init if std_init is not None else (0.0, 1.0)
     allowance = rise_rate_per_hour if rise_rate_per_hour is not None else None
     bounds = np.flatnonzero(np.diff(w)) + 1
     clock = None
@@ -106,7 +106,21 @@ def replay_budget(S, t, w, y, node, B, q0, eta, delay_ns=0, dedupe_ns=HOUR, fake
             eta = eta_scale * (spread if spread > 0 else 1.0)
         while refunds and refunds[0][0] <= clock:
             q -= eta * refunds.popleft()[1]
-        f = S[lo:hi] >= q
+        s_b = S[lo:hi]
+        if std_window is not None:
+            if n_hist >= min(std_window, 10000):
+                h = np.concatenate(hist)
+                loc = float(np.median(h))
+                mad = 1.4826 * float(np.median(np.abs(h - loc)))
+                scale = mad if mad > 0 else scale
+            s_eval = (s_b - loc) / scale
+            hist.append(s_b)
+            n_hist += hi - lo
+            while n_hist - len(hist[0]) >= std_window:
+                n_hist -= len(hist.popleft())
+        else:
+            s_eval = s_b
+        f = s_eval >= q
         flags[lo:hi] = f
         n_new, n_new_attack = 0, 0
         for i in np.flatnonzero(f) + lo:
@@ -177,6 +191,8 @@ def main():
     ap.add_argument("--group", default="da39a3ee5e")
     ap.add_argument("--only_adaptive", action="store_true",
                     help="compare fixed vs scale-free (adaptive) step only")
+    ap.add_argument("--only_std", action="store_true",
+                    help="compare raw vs online robust standardization only")
     args = ap.parse_args()
     cache = os.path.join(args.artifact_dir, "caliber", "cache")
     members = data.group_manifests(data.load_manifests(
@@ -200,8 +216,10 @@ def main():
 
     def go(tag, B, stx=st, fake=None, cold=False, **kw):
         days = day_of(stx["t1"], tz)
+        q0 = kw.pop("q0", None)
+        q0 = warm_start(B, cold) if q0 is None else q0
         f, inc = replay_budget(stx["S"], stx["t1"], stx["w"], stx["y"], stx["node"], B,
-                               warm_start(B, cold), kw.pop("eta", 0.02 * sd), fake=fake, **kw)
+                               q0, kw.pop("eta", 0.02 * sd), fake=fake, **kw)
         real = ~fake if fake is not None else np.ones(len(f), bool)
         s = summarize(f[real], inc[real], stx["y"][real], stx["node"][real], days[real], B)
         res[tag] = s
@@ -210,6 +228,27 @@ def main():
               f"attack entities hit {s['attack_entities_hit']}/{s['attack_entities']}")
 
     print(f"== {args.system}/{args.dataset} units={len(st['S'])}")
+    if args.only_std:
+        med_v = float(np.median(cal))
+        mad_v = 1.4826 * float(np.median(np.abs(cal - med_v))) or 1.0
+        cal_std = (cal - med_v) / mad_v
+        sd_std = float(np.std(cal_std)) or 1.0
+
+        def q0_std(B):
+            k = min(max(int(B * n_val_days), 1), len(cal_std))
+            return float(np.sort(cal_std)[-k])
+
+        for B in [10, 50, 200]:
+            go(f"B={B} raw", B)
+            for win in [50000, 200000]:
+                go(f"B={B} std win={win}", B, q0=q0_std(B), eta=0.02 * sd_std,
+                   std_window=win, std_init=(med_v, mad_v))
+        for rate, k in [(1000, 10), (1000, 100)]:
+            stf, fake = flood(st, labels, rate, 6, k, high)
+            go(f"B=50 raw flood {rate}/h x6h from {k}", 50, stx=stf, fake=fake)
+            go(f"B=50 std flood {rate}/h x6h from {k}", 50, stx=stf, fake=fake, q0=q0_std(50),
+               eta=0.02 * sd_std, std_window=200000, std_init=(med_v, mad_v))
+        return
     if args.only_adaptive:
         for B in [10, 50, 200]:
             go(f"B={B} fixed-eta", B)
