@@ -27,10 +27,20 @@ from caliber.budget import DAY, HOUR
 from caliber.online import day_of, ensemble_stream
 
 
-def replay_defer(S, Z, t, w, y, node, B, q0, eta, rho=0.0, dedupe_ns=HOUR, max_gap_ns=HOUR):
-    """Returns per-unit decision codes: 0 dismiss, 1 alert, 2 defer; and incident flags."""
+def replay_defer(S, Z, t, w, y, node, B, q0, eta, rho=0.0, dedupe_ns=HOUR, max_gap_ns=HOUR,
+                 mode="vote", k_ci=2.0):
+    """Returns per-unit decision codes: 0 dismiss, 1 alert, 2 defer; and incident flags.
+
+    mode="vote": defer units whose member votes split (0 < V < 1).
+    mode="ci":   defer units whose decision is not statistically resolved: the threshold lies
+                 within k_ci standard errors of the ensemble mean, |S - q| < k_ci * sd_m / sqrt(M).
+                 These are the decisions another ensemble of the same size could plausibly
+                 reverse; decisions outside the interval should agree across ensembles."""
+    sem_all = Z.std(0) / np.sqrt(Z.shape[0]) if mode == "ci" else None
     order = np.lexsort((t, w))
     S, Z, t, w, y, node = S[order], Z[:, order], t[order], w[order], y[order], node[order]
+    if sem_all is not None:
+        sem_all = sem_all[order]
     dec = np.zeros(len(S), np.int8)
     inc = np.zeros(len(S), bool)
     last = {}
@@ -45,8 +55,14 @@ def replay_defer(S, Z, t, w, y, node, B, q0, eta, rho=0.0, dedupe_ns=HOUR, max_g
             day_id, day_used = d, 0.0
         votes = (Z[:, lo:hi] >= q).mean(0)
         s = S[lo:hi]
-        alert = (s >= q) & (votes == 1.0)
-        cand = (votes > 0) & (votes < 1)
+        if mode == "ci":
+            margin = np.abs(s - q) / np.maximum(sem_all[lo:hi], 1e-9)
+            cand = margin < k_ci
+            alert = (s >= q) & ~cand
+            votes = -margin                            # serve the least resolved first
+        else:
+            alert = (s >= q) & (votes == 1.0)
+            cand = (votes > 0) & (votes < 1)
         if rho == 0:                                   # no deferral: plain threshold
             alert = s >= q
             cand[:] = False
@@ -87,7 +103,7 @@ def jaccard(a, b):
     return len(a & b) / max(len(a | b), 1)
 
 
-def run_policy(st, idx, cal_all, B, rho, n_val_days):
+def run_policy(st, idx, cal_all, B, rho, n_val_days, mode="vote"):
     Z = st["Z"][idx]
     S = Z.mean(0)
     cal = np.nanmean(st["Z_val"][idx], 0)
@@ -95,7 +111,8 @@ def run_policy(st, idx, cal_all, B, rho, n_val_days):
     k = min(max(int(B * n_val_days), 1), len(cal))
     q0 = float(np.sort(cal)[-k])
     eta = 0.02 * (float(np.std(cal)) or 1.0)
-    dec, inc = replay_defer(S, Z, st["t1"], st["w"], st["y"], st["node"], B, q0, eta, rho)
+    dec, inc = replay_defer(S, Z, st["t1"], st["w"], st["y"], st["node"], B, q0, eta, rho,
+                            mode=mode)
     return dec, inc
 
 
@@ -144,14 +161,14 @@ def main():
     out["single_run_jaccard"] = js
     print(f"  single runs           auto-alert Jaccard mean={np.mean(js):.3f} {np.round(js, 3).tolist()}")
 
-    for rho in [0.0, 0.1, 0.25, 0.5]:
-        da, ia = run_policy(st, half_a, None, B, rho, nvd)
-        db, ib = run_policy(st, half_b, None, B, rho, nvd)
+    for mode, rho in [("vote", 0.0)] + [(m, r) for m in ["vote", "ci"] for r in [0.1, 0.25, 0.5]]:
+        da, ia = run_policy(st, half_a, None, B, rho, nvd, mode)
+        db, ib = run_policy(st, half_b, None, B, rho, nvd, mode)
         j = jaccard(incident_keys(da, ia, st["t1"], st["node"], 1),
                     incident_keys(db, ib, st["t1"], st["node"], 1))
         sa, sb = summarize(st, da, ia, B, tz), summarize(st, db, ib, B, tz)
-        out[f"rho={rho}"] = {"jaccard_auto": j, "A": sa, "B": sb}
-        print(f"  ensemble(5) rho={rho:<4}  auto-alert Jaccard={j:.3f} | A: auto_benign/day={sa['auto_benign_per_day']:.1f} "
+        out[f"{mode} rho={rho}"] = {"jaccard_auto": j, "A": sa, "B": sb}
+        print(f"  ensemble(5) {mode:4s} rho={rho:<4} auto-alert Jaccard={j:.3f} | A: auto_benign/day={sa['auto_benign_per_day']:.1f} "
               f"defer/day={sa['defer_per_day']:.1f} total={sa['total_benign_ratio']:.2f}xB "
               f"attack auto={sa['attack_entities_auto']} +deferred={sa['attack_entities_deferred_only']}"
               f"/{sa['attack_entities']} | B: auto={sb['attack_entities_auto']} +def={sb['attack_entities_deferred_only']}",

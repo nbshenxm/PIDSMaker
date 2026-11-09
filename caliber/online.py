@@ -45,7 +45,7 @@ def ensemble_stream(members, labels, window="batch", epoch_rule="min_val_loss", 
         test = unit_table(data.read_split(m["edge_losses_dir"], "test", ep, cache_dir), "entity_window", window)
         if idx_test is None:
             idx_test, tt = test.index, test
-            val_idx = val.index
+            val_idx, tv = val.index, val
         test = test.reindex(idx_test)
         val = val.reindex(val_idx)
         f = normaliser(val["score"].values, "robust_z")
@@ -59,6 +59,7 @@ def ensemble_stream(members, labels, window="batch", epoch_rule="min_val_loss", 
         "node": idx_test.get_level_values("node").values,
         "Z": np.vstack(zs_test),                   # per-member scores (for vote splits)
         "Z_val": np.vstack(zs_val),
+        "t_val": tv["t1"].values,                  # validation unit times (rate calibration)
     }
 
 

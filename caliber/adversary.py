@@ -28,10 +28,10 @@ import os
 import numpy as np
 
 from caliber import data
-from caliber.budget import DAY, HOUR, replay_budget
+from caliber.budget import HOUR, calibrate_rise_rate, replay_budget
 from caliber.online import day_of, ensemble_stream
 
-POLICIES = ["static", "caliber", "nodedupe"]
+POLICIES = ["static", "caliber", "nodedupe", "caliber_rl"]
 
 
 def warm_start(cal, B, n_val_days):
@@ -86,24 +86,36 @@ def drift_events(starts, max_rate_h, days, rng):
     return np.concatenate(ts), np.concatenate(es)
 
 
-def evaluate(st, labels, cal, sd, B, policy, fake=None, tz="US/Eastern", n_val_days=1):
+def evaluate(st, labels, cal, sd, B, policy, fake=None, tz="US/Eastern", n_val_days=1,
+             rise_rate=None):
     q0 = warm_start(cal, B, n_val_days)
     eta = 0.0 if policy == "static" else 0.02 * sd
     dedupe = 0 if policy == "nodedupe" else HOUR
+    rr = rise_rate if policy == "caliber_rl" else None
     f, inc = replay_budget(st["S"], st["t1"], st["w"], st["y"], st["node"], B, q0, eta,
-                           dedupe_ns=dedupe, fake=fake)
+                           dedupe_ns=dedupe, fake=fake, rise_rate_per_hour=rr)
     days = day_of(st["t1"], tz)
     real = ~fake if fake is not None else np.ones(len(f), bool)
-    y, node = st["y"], st["node"]
+    y, node, S, t = st["y"], st["node"], st["S"], st["t1"]
     ben = inc & real & ~y
     per_day = {d: int((ben & (days == d)).sum()) for d in np.unique(days[real])}
     fp = np.array(list(per_day.values()), float)
     n_days = max(len(per_day), 1)
     att_nodes = set(node[real & y])
+    # Detection under fixed analyst capacity: analysts review at most B incidents per day,
+    # either highest score first (optimistic: needs the whole day) or first come first served.
+    rev_top, rev_fifo = set(), set()
+    for d in np.unique(days):
+        idx = np.flatnonzero(inc & (days == d))
+        top = idx[np.argsort(-S[idx], kind="stable")][: int(B)]
+        fifo = idx[np.argsort(t[idx], kind="stable")][: int(B)]
+        rev_top |= set(node[top[(real & y)[top]]])
+        rev_fifo |= set(node[fifo[(real & y)[fifo]]])
     return {
         "benign_ratio": float(fp.mean() / B), "worst_day_ratio": float(fp.max() / B),
         "attacker_incidents_per_day": float((inc & ~real).sum() / n_days),
         "attack_entities_hit": len(set(node[f & real & y])), "attack_entities": len(att_nodes),
+        "reviewed_topB": len(rev_top), "reviewed_fifo": len(rev_fifo),
     }
 
 
@@ -127,20 +139,23 @@ def main():
     nvd = max(len(members[0].get("val_dates", [])), 1)
     B = args.budget
     q0 = warm_start(cal, B, nvd)
+    fin = np.isfinite(st["S_val"])
+    rise = calibrate_rise_rate(st["S_val"][fin], st["t_val"][fin], B)
     starts = attack_starts(st, labels)
     rng = np.random.default_rng(0)
     rows = []
 
     def run(scn, params, stx=st, fake=None):
         for pol in POLICIES:
-            r = evaluate(stx, labels, cal, sd, B, pol, fake, tz, nvd)
+            r = evaluate(stx, labels, cal, sd, B, pol, fake, tz, nvd, rise_rate=rise)
             r.update({"scenario": scn, "policy": pol, **params})
             rows.append(r)
-            print(f"  {scn:9s} {json.dumps(params):70s} {pol:8s} benign={r['benign_ratio']:5.2f}xB "
+            print(f"  {scn:9s} {json.dumps(params):70s} {pol:10s} benign={r['benign_ratio']:5.2f}xB "
                   f"(worst {r['worst_day_ratio']:5.2f}) attacker_inc/day={r['attacker_incidents_per_day']:8.1f} "
-                  f"hit={r['attack_entities_hit']}/{r['attack_entities']}", flush=True)
+                  f"hit={r['attack_entities_hit']}/{r['attack_entities']} reviewed top/fifo="
+                  f"{r['reviewed_topB']}/{r['reviewed_fifo']}", flush=True)
 
-    print(f"== {args.system}/{args.dataset} B={B} units={len(st['S'])}")
+    print(f"== {args.system}/{args.dataset} B={B} units={len(st['S'])} rise_rate/h={rise} (val sd={sd:.3f})")
     run("none", {})
     if args.scenario in ("all", "S1"):
         hi, lo = float(np.max(cal)) * 2 + 1, q0 + 0.05 * sd

@@ -33,12 +33,15 @@ def main():
                     timing[p].append(r["attack_entities_hit"])
                 continue
             st, ca, nd = pol["static"], pol["caliber"], pol["nodedupe"]
+            rl = pol.get("caliber_rl", ca)
             ps = " ".join(f"{k}={v}" for k, v in params)
-            print(f"  {scn:11s} {ps:58s} hit S/C/N={st['attack_entities_hit']:3d}/"
-                  f"{ca['attack_entities_hit']:3d}/{nd['attack_entities_hit']:3d} of "
-                  f"{st['attack_entities']:3d} | attacker inc/day S={st['attacker_incidents_per_day']:7.1f} "
-                  f"C={ca['attacker_incidents_per_day']:7.1f} | benign xB S={st['benign_ratio']:.2f} "
-                  f"C={ca['benign_ratio']:.2f}")
+            rev = lambda r: f"{r.get('reviewed_fifo', -1):3d}"  # noqa: E731
+            print(f"  {scn:11s} {ps:52s} hit S/C/N/RL={st['attack_entities_hit']:3d}/"
+                  f"{ca['attack_entities_hit']:3d}/{nd['attack_entities_hit']:3d}/"
+                  f"{rl['attack_entities_hit']:3d} of {st['attack_entities']:3d} | "
+                  f"reviewed@B(fifo) S/C/RL={rev(st)}/{rev(ca)}/{rev(rl)} | attacker inc/day "
+                  f"S={st['attacker_incidents_per_day']:7.1f} C={ca['attacker_incidents_per_day']:7.1f} "
+                  f"RL={rl['attacker_incidents_per_day']:7.1f}")
         for p, v in timing.items():
             v = sorted(v)
             print(f"  S3-timing   {p:9s} attack entities hit over {len(v)} offsets: "

@@ -35,8 +35,36 @@ HOUR = 3600 * 10**9
 DAY = 24 * HOUR
 
 
+def calibrate_rise_rate(S_val, t_val, B, window_h=6, factor=2.0):
+    """Fastest benign drift of a B/day threshold, per hour, measured on the validation day.
+
+    For sliding windows of `window_h` hours (stride 1 h) we take the threshold that would give
+    B/day within that window; the rate is `factor` x the largest hour-to-hour change. Benign
+    behavior never required the threshold to move faster than this, so a controller limited to
+    this rate still tracks benign shift but caps how fast an alert flood can push it up."""
+    t0 = t_val.min()
+    hours = int((t_val.max() - t0) // HOUR) + 1
+    k = max(int(round(B * window_h / 24)), 1)
+    qs = []
+    for h in range(0, max(hours - window_h, 0) + 1):
+        m = (t_val >= t0 + h * HOUR) & (t_val < t0 + (h + window_h) * HOUR)
+        if m.sum() > k:
+            qs.append(np.sort(S_val[m])[-k])
+    if len(qs) < 2:
+        return None
+    return factor * float(np.max(np.abs(np.diff(qs))))
+
+
 def replay_budget(S, t, w, y, node, B, q0, eta, delay_ns=0, dedupe_ns=HOUR, fake=None,
-                  max_gap_ns=HOUR, eta_scale=None, window_units=50000):
+                  max_gap_ns=HOUR, eta_scale=None, window_units=50000, spread_stat="tail",
+                  rise_rate_per_hour=None):
+    """rise_rate_per_hour: if set, upward threshold moves are limited to this many score units
+    per hour of credited time (allowance refilled continuously, capped at one hour's worth);
+    downward moves are not limited. See calibrate_rise_rate.
+
+    spread_stat: statistic for the adaptive step: "tail" (99.9th percentile - median) or "mad"
+    (1.4826 x median absolute deviation, 50% breakdown: a minority of attacker-chosen scores
+    cannot inflate it)."""
     """max_gap_ns: elapsed time credited for budget is capped per batch, so gaps in the
     dataset (e.g. CADETS_E3 test days 04-06 then 04-11) do not release days of unused
     budget at once. A deployment streams continuously; dataset gaps are artifacts.
@@ -55,19 +83,26 @@ def replay_budget(S, t, w, y, node, B, q0, eta, delay_ns=0, dedupe_ns=HOUR, fake
     q = q0
     refunds = deque()
     recent, n_recent = deque(), 0
+    allowance = rise_rate_per_hour if rise_rate_per_hour is not None else None
     bounds = np.flatnonzero(np.diff(w)) + 1
     clock = None
     for lo, hi in zip(np.r_[0, bounds], np.r_[bounds, len(S)]):
         tmax = t[lo:hi].max()
         dt = 0.0 if clock is None else min(max(tmax - clock, 0), max_gap_ns) / DAY
         clock = tmax if clock is None else max(clock, tmax)
+        if allowance is not None:
+            allowance = min(allowance + rise_rate_per_hour * dt * 24, rise_rate_per_hour)
         if eta_scale is not None:
             recent.append(S[lo:hi])
             n_recent += hi - lo
             while n_recent - len(recent[0]) >= window_units:
                 n_recent -= len(recent.popleft())
             r = np.concatenate(recent)
-            spread = float(np.quantile(r, 0.999) - np.median(r))
+            if spread_stat == "mad":
+                med = np.median(r)
+                spread = 1.4826 * float(np.median(np.abs(r - med)))
+            else:
+                spread = float(np.quantile(r, 0.999) - np.median(r))
             eta = eta_scale * (spread if spread > 0 else 1.0)
         while refunds and refunds[0][0] <= clock:
             q -= eta * refunds.popleft()[1]
@@ -83,7 +118,11 @@ def replay_budget(S, t, w, y, node, B, q0, eta, delay_ns=0, dedupe_ns=HOUR, fake
             n_new += 1
             if y[i] and not fk[i]:
                 n_new_attack += 1
-        q += eta * (n_new - B * dt)
+        step = eta * (n_new - B * dt)
+        if allowance is not None and step > 0:
+            step = min(step, allowance)
+            allowance -= step
+        q += step
         if n_new_attack:
             refunds.append((clock + delay_ns, n_new_attack))
     inv = np.empty_like(order)
@@ -174,14 +213,13 @@ def main():
     if args.only_adaptive:
         for B in [10, 50, 200]:
             go(f"B={B} fixed-eta", B)
-            for c in [0.005, 0.02, 0.05]:
-                go(f"B={B} adaptive-eta c={c}", B, eta_scale=c)
-        for d in [1, 24]:
-            go(f"B=50 adaptive c=0.02 delay={d}h", 50, eta_scale=0.02, delay_ns=d * HOUR)
-        for rate, k in [(1000, 10), (1000, 100)]:
-            stf, fake = flood(st, labels, rate, 6, k, high)
-            go(f"B=50 adaptive c=0.02 flood {rate}/h x6h from {k}", 50, stx=stf, fake=fake,
-               eta_scale=0.02)
+            for c in [0.1, 0.5, 2.0]:
+                go(f"B={B} adaptive-MAD c={c}", B, eta_scale=c, spread_stat="mad")
+        for c in [0.5, 2.0]:
+            for rate, k in [(1000, 10), (1000, 100)]:
+                stf, fake = flood(st, labels, rate, 6, k, high)
+                go(f"B=50 MAD c={c} flood {rate}/h x6h from {k}", 50, stx=stf, fake=fake,
+                   eta_scale=c, spread_stat="mad")
         return
     for B in [10, 50, 200]:
         go(f"B={B}", B)
