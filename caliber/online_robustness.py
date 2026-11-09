@@ -31,9 +31,19 @@ HOUR = 3600 * 10**9
 
 
 def replay_general(S, t, w, y, cal, alpha, method="qtrack", eta_factor=0.05, gamma=0.005,
-                   delay_ns=0, miss_p=0.0, fake=None, seed=0):
+                   delay_ns=0, miss_p=0.0, fake=None, seed=0, ceil_factor=None):
     """Batch-wise online control with delayed / noisy feedback and optional fake units.
 
+    method:
+      static   fixed conformal threshold
+      aci      adaptive conformal inference on alpha_t (needs verdicts)
+      qtrack   quantile tracking driven by analyst verdicts (err = dismissed alert)
+      rate     quantile tracking driven by ALL alerts immediately (label-free alert-rate
+               control); a verdict that an alert was a real attack later REFUNDS its
+               increment, so attacks do not consume the false-alarm budget
+    ceil_factor: if set, the threshold may never exceed the static conformal threshold at
+          alpha / ceil_factor. Worst case under any feedback manipulation is then a static
+          detector at that stricter level.
     fake: boolean mask of injected units (scored, alertable, analyst-dismissed, but
           excluded from the reported metrics)."""
     rng = np.random.default_rng(seed)
@@ -46,19 +56,27 @@ def replay_general(S, t, w, y, cal, alpha, method="qtrack", eta_factor=0.05, gam
     if not np.isfinite(q_t):
         q_t = np.max(cal)
     eta = eta_factor * (np.std(cal) or 1.0)
-    pending = deque()            # (release_time, n_false_alarms, n_units)
+    q_cap = np.inf
+    if ceil_factor:
+        q_cap = conformal.threshold(cal, alpha / ceil_factor)
+        if not np.isfinite(q_cap):
+            q_cap = np.max(cal)
+    pending = deque()            # (release_time, n_false_alarms, n_units) or ("refund", n_tp)
     bounds = np.flatnonzero(np.diff(w)) + 1
+    clock = -np.inf               # monotone clock: PIDSMaker batches overlap in time
     for lo, hi in zip(np.r_[0, bounds], np.r_[bounds, len(S)]):
-        now = t[lo:hi].max()
-        while pending and pending[0][0] <= now:          # apply verdicts that have arrived
-            _, n_fa, n = pending.popleft()
-            for _ in range(n - n_fa):
-                a_t += gamma * alpha
-                q_t -= eta * alpha
-            for _ in range(n_fa):
-                a_t += gamma * (alpha - 1)
-                q_t += eta * (1 - alpha)
-        if method == "qtrack":
+        clock = max(clock, t[lo:hi].max())
+        while pending and pending[0][0] <= clock:        # apply verdicts that have arrived
+            item = pending.popleft()
+            if item[1] == "refund":                      # rate mode: confirmed attacks
+                q_t -= eta * item[2]
+                continue
+            _, n_fa, n = item
+            # n unit-level updates, n_fa of them with err=1 (additive, so summed)
+            a_t += gamma * (alpha * n - n_fa)
+            q_t += eta * (n_fa - alpha * n)
+        q_t = min(q_t, q_cap)
+        if method in ("qtrack", "rate"):
             thr = q_t
         elif method == "aci":
             thr = conformal.threshold(cal, min(a_t, 1.0)) if a_t > 0 else np.inf
@@ -67,9 +85,21 @@ def replay_general(S, t, w, y, cal, alpha, method="qtrack", eta_factor=0.05, gam
         f = S[lo:hi] >= thr
         flags[lo:hi] = f
         benign_alert = f & (~y[lo:hi] | fk[lo:hi])
+        if method == "rate":
+            # immediate, label-free update: every alert counts as a false alarm now
+            n_alert = int(f.sum())
+            n = hi - lo
+            q_t += eta * (n_alert * (1 - alpha) - (n - n_alert) * alpha)
+            q_t = min(q_t, q_cap)
+            # later, analysts confirm the real attacks -> refund those increments
+            n_tp = int((f & ~benign_alert).sum())
+            n_tp += rng.binomial(int(benign_alert.sum()), miss_p)   # analyst error
+            if n_tp:
+                pending.append((clock + delay_ns, "refund", n_tp * (1 - alpha)))
+            continue
         # analyst error: some true false alarms are (wrongly) marked malicious
         n_fa = int(benign_alert.sum() - rng.binomial(int(benign_alert.sum()), miss_p))
-        pending.append((now + delay_ns, n_fa, hi - lo))
+        pending.append((clock + delay_ns, n_fa, hi - lo))
     inv = np.empty_like(order)
     inv[order] = np.arange(len(order))
     return flags[inv]
@@ -126,23 +156,28 @@ def main():
               f"alerts={s['alerts']:6d} TP={s['tp']:4d}")
 
     print(f"== {args.system}/{args.dataset} units={len(st['S'])} malicious={int(st['y'].sum())}")
-    for a in [1e-4, 3e-4, 1e-3, 1e-2]:
-        for m in ["static", "aci", "qtrack"]:
-            show(f"alpha={a} {m}", run(st, labels, cal, days, alpha=a, method=m), a)
-    a = 1e-3
-    for d in [1, 4, 12, 24]:
-        show(f"alpha={a} qtrack delay={d}h", run(st, labels, cal, days, alpha=a, delay_ns=d * HOUR), a)
-    for p in [0.1, 0.3, 0.5]:
-        show(f"alpha={a} qtrack miss_p={p}", run(st, labels, cal, days, alpha=a, miss_p=p), a)
-    for e in [0.01, 0.05, 0.2, 1.0]:
-        show(f"alpha={a} qtrack eta={e}", run(st, labels, cal, days, alpha=a, eta_factor=e), a)
+    for a in [1e-4, 1e-3]:
+        show(f"alpha={a} static", run(st, labels, cal, days, alpha=a, method="static"), a)
+    variants = [("qtrack", None), ("rate", None), ("qtrack", 10), ("rate", 10)]
     high = float(np.max(cal)) * 2 + 1
-    for n in [10, 100, 1000]:
-        for h in [1, 6]:
+    for m, c in variants:
+        tag = f"{m}{'+ceil' + str(c) if c else ''}"
+        kw = dict(method=m, ceil_factor=c)
+        for a in [1e-4, 3e-4, 1e-3]:
+            show(f"alpha={a} {tag}", run(st, labels, cal, days, alpha=a, **kw), a)
+        a = 1e-3
+        for d in [1, 4, 12, 24]:
+            show(f"alpha={a} {tag} delay={d}h",
+                 run(st, labels, cal, days, alpha=a, delay_ns=d * HOUR, **kw), a)
+        for p in [0.1, 0.3]:
+            show(f"alpha={a} {tag} miss_p={p}", run(st, labels, cal, days, alpha=a, miss_p=p, **kw), a)
+        for e in [0.01, 0.2]:
+            show(f"alpha={a} {tag} eta={e}", run(st, labels, cal, days, alpha=a, eta_factor=e, **kw), a)
+        for n, h in [(100, 6), (1000, 6)]:
             stf, fake = inject_flood(st, labels, n, h, high)
             s = run(stf, labels, cal, day_of(stf["t1"], labels.get("timezone", "US/Eastern")),
-                    alpha=a, fake=fake)
-            show(f"alpha={a} qtrack flood={n}/h x{h}h", s, a)
+                    alpha=a, fake=fake, **kw)
+            show(f"alpha={a} {tag} flood={n}/h x{h}h", s, a)
     rep = os.path.join(args.artifact_dir, "caliber", "reports")
     with open(os.path.join(rep, f"online_robust_{args.system}_{args.dataset}_{args.group}.json"),
               "w", encoding="utf-8") as f:
