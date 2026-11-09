@@ -163,22 +163,29 @@ def main():
         k = min(max(int(B * nvd), 1), len(cal))
         q0 = float(np.sort(cal)[-k])
         sd = float(np.std(cal)) or 1.0
-        q_act0 = float(np.sort(cal)[-max(k // 10, 1)])
-        # baseline: all alerts to triage (no automation); then false-automation budgets
-        for b_auto in [None, 0.25, 0.5, 1.0, 2.0]:
+        # baseline: all alerts to triage (no automation); then false-automation budgets.
+        # Warm start: the validation threshold that would give ~B_auto/day (top-1 when < 1/day).
+        # The act tier's budget is ~100x smaller than the review budget, so its controller needs
+        # a proportionally larger step; we sweep it (in validation-score SDs).
+        settings = [(None, None)] + [(b, e) for b in [0.25, 1.0] for e in [0.02, 0.2, 1.0]]
+        for b_auto, eta_a in settings:
             for audit in [0.05]:
                 rng = np.random.default_rng(0)
+                ka = max(int((b_auto or 1) * nvd), 1)
+                q_act0 = float(np.sort(cal)[-ka])
                 case_of, cases = replay_tiers(
                     S, st["t1"], st["w"], st["y"], lin, B, q0, 0.02 * sd,
                     2.0, audit if b_auto is not None else 0.0,
-                    0.02 * sd, q_act0 if b_auto is not None else np.inf, rng, B_auto=b_auto)
+                    (eta_a or 0.02) * sd, q_act0 if b_auto is not None else np.inf, rng,
+                    B_auto=b_auto)
                 r = evaluate(st, case_of, cases, B, tz)
                 fa = [c for c in cases if c["tier"] == "A" and not c["y"]]
                 nd = max(len(np.unique(day_of(st["t1"], tz))), 1)
                 r["false_automations_per_day"] = len(fa) / nd
-                tag = f"{score_name} " + ("all-to-triage" if b_auto is None else f"B_auto={b_auto}")
+                tag = f"{score_name} " + ("all-to-triage" if b_auto is None
+                                          else f"B_auto={b_auto} eta_act={eta_a}")
                 out[tag] = r
-                print(f"  {tag:24s} false-auto/day={r.get('false_automations_per_day', 0):5.2f} analyst/day={r['analyst_load_per_day']:6.1f} "
+                print(f"  {tag:34s} false-auto/day={r.get('false_automations_per_day', 0):5.2f} analyst/day={r['analyst_load_per_day']:6.1f} "
                       f"(all-to-triage {r['all_to_triage_load_per_day']:6.1f}) auto share={r['automation_share']:.2f} "
                       f"prec A={r['precision_A']:.2f} B={r['precision_B']:.3f} | attack entities "
                       f"auto={r['attack_entities_automated']} reviewed={r['attack_entities_reviewed']} "
