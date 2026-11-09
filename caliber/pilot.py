@@ -188,6 +188,10 @@ def analyse_group(members, labels, epoch_rule="min_val_loss", cache_dir=None, lo
 
     Zt, Zc = np.vstack(z_test), np.vstack(z_cal)
     S, U = Zt.mean(0), Zt.std(0)
+    # Scale-free disagreement: std of each member's percentile rank among test units.
+    # Rules out "U is just larger where scores are larger" (heteroscedastic spread).
+    R = np.vstack([pd.Series(z).rank(pct=True).values for z in Zt])
+    U_rank = R.std(0)
     S_cal = Zc.mean(0)
     V = np.vstack(vote).mean(0)
     p_ens = conformal.pvalues(S_cal, S)
@@ -226,6 +230,8 @@ def analyse_group(members, labels, epoch_rule="min_val_loss", cache_dir=None, lo
     q1["cv_S"] = cv_auc(X_s, y)
     q1["cv_S_U"] = cv_auc(X_su, y)
     q1["cv_S_U_SxU"] = cv_auc(X_suv, y)
+    q1["spearman_S_Urank"] = float(spearmanr(S, U_rank).correlation)
+    q1["cv_S_Urank"] = cv_auc(np.column_stack([S, U_rank]), y)
     q1["flagged"] = {}
     q1["near_band"] = {}
     for a in [1e-3, 1e-2]:
@@ -233,10 +239,12 @@ def analyse_group(members, labels, epoch_rule="min_val_loss", cache_dir=None, lo
         # AUROC of LOW disagreement for being a true positive among flagged nodes
         q1["flagged"][str(a)] = {"n": int(f.sum()), "tp": int(y[f].sum()),
                                  "auroc_negU_tp_vs_fp": _auc(y[f], -U[f]) if f.any() else None,
+                                 "auroc_negUrank_tp_vs_fp": _auc(y[f], -U_rank[f]) if f.any() else None,
                                  "auroc_S_tp_vs_fp": _auc(y[f], S[f]) if f.any() else None}
         band = (p_ens > a) & (p_ens <= 10 * a)
         q1["near_band"][str(a)] = {"n": int(band.sum()), "fn": int(y[band].sum()),
                                    "auroc_U_fn_vs_tn": _auc(y[band], U[band]) if band.any() else None,
+                                   "auroc_Urank_fn_vs_tn": _auc(y[band], U_rank[band]) if band.any() else None,
                                    "auroc_S_fn_vs_tn": _auc(y[band], S[band]) if band.any() else None}
     out["q1"] = q1
 
@@ -251,7 +259,7 @@ def analyse_group(members, labels, epoch_rule="min_val_loss", cache_dir=None, lo
     p0 = conformal.pvalues(b0, raw_test[0])
     out["q3_far"]["member0"] = conformal.empirical_far(p0[benign], ALPHAS)
 
-    arrays = {"S": S, "U": U, "V": V, "p_ens": p_ens, "y": y}
+    arrays = {"S": S, "U": U, "U_rank": U_rank, "V": V, "p_ens": p_ens, "y": y}
     if isinstance(test_index, pd.MultiIndex):
         arrays["w"] = test_index.get_level_values(0).values
         arrays["node"] = test_index.get_level_values(1).values
@@ -276,12 +284,14 @@ def to_markdown(key, res):
     q1 = res["q1"]
     L.append(f"- Q1 spearman(S,U)={q1['spearman_S_U']:.3f}; CV AP: S={q1['cv_S'] and q1['cv_S']['ap']}, "
              f"S+U={q1['cv_S_U'] and q1['cv_S_U']['ap']}, S+U+SxU={q1['cv_S_U_SxU'] and q1['cv_S_U_SxU']['ap']}")
+    L.append(f"  - rank-based U: spearman(S,U_rank)={q1['spearman_S_Urank']:.3f}; "
+             f"CV AP S+U_rank={q1['cv_S_Urank'] and q1['cv_S_Urank']['ap']}")
     for a, v in q1["flagged"].items():
         L.append(f"  - flagged p<={a}: n={v['n']} tp={v['tp']} AUROC(-U: TP vs FP)={v['auroc_negU_tp_vs_fp']} "
-                 f"AUROC(S)={v['auroc_S_tp_vs_fp']}")
+                 f"AUROC(-U_rank)={v['auroc_negUrank_tp_vs_fp']} AUROC(S)={v['auroc_S_tp_vs_fp']}")
     for a, v in q1["near_band"].items():
         L.append(f"  - band ({a}, {10*float(a):g}]: n={v['n']} fn={v['fn']} AUROC(U: FN vs TN)={v['auroc_U_fn_vs_tn']} "
-                 f"AUROC(S)={v['auroc_S_fn_vs_tn']}")
+                 f"AUROC(U_rank)={v['auroc_Urank_fn_vs_tn']} AUROC(S)={v['auroc_S_fn_vs_tn']}")
     L.append("- Q3 empirical FAR (benign test nodes) vs alpha:")
     L.append("  | alpha | ensemble | member0 |")
     L.append("  |---|---|---|")
