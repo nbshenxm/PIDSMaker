@@ -41,11 +41,15 @@ def wilson_lower(pos, n, conf=0.9):
 
 
 def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
-                 max_gap_ns=HOUR, window_audits=50, B_auto=None):
+                 max_gap_ns=HOUR, window_audits=50, B_auto=None, S_act=None):
     """B_auto: if set, q_act is driven by a false-automation budget instead of a precision
     target: at most ~B_auto benign cases per day may be acted on automatically. Same
     label-free controller as the review budget (Proposition 1): every new tier-A case counts
-    immediately and confirmed attacks are refunded. No audit sample is needed for control."""
+    immediately and confirmed attacks are refunded. No audit sample is needed for control.
+    S_act: statistic for the act tier (default S). With the confidence-interval rule, S is the
+    upper bound (a unit is dismissed only if it is confidently below q_rev) and S_act the
+    lower bound (a unit is automated only if it is confidently above q_act)."""
+    S_act = S if S_act is None else S_act
     order = np.lexsort((t, w))
     case_of = np.full(len(S), -1, np.int64)        # case index per alerted unit
     cases = []                                     # dicts: key, hour, tier, audited
@@ -63,7 +67,7 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
             kh = (keys[i], int(t[i] // HOUR))
             c = open_case.get(kh)
             if c is None:
-                tier = "A" if S[i] >= q_act else "B"
+                tier = "A" if S_act[i] >= q_act else "B"
                 aud = tier == "A" and rng.random() < audit
                 cases.append({"tier": tier, "audited": aud, "y": bool(y[i])})
                 c = len(cases) - 1
@@ -142,6 +146,8 @@ def main():
     ap.add_argument("--dataset", required=True)
     ap.add_argument("--group", default="da39a3ee5e")
     ap.add_argument("--budget", type=float, default=50)
+    ap.add_argument("--kappa", type=float, default=1.645,
+                    help="confidence-interval half-width in ensemble standard errors")
     args = ap.parse_args()
     cache = os.path.join(args.artifact_dir, "caliber", "cache")
     members = data.group_manifests(data.load_manifests(
@@ -156,10 +162,20 @@ def main():
     nvd = max(len(members[0].get("val_dates", [])), 1)
     out = {}
     print(f"== {args.system}/{args.dataset} B={B} lineage={'yes' if parents is not None else 'no'}")
-    for score_name in ["ensemble", "single_run"]:
-        S = st["S"] if score_name == "ensemble" else st["Z"][0]
-        cal = (st["S_val"] if score_name == "ensemble" else st["Z_val"][0])
+    M = st["Z"].shape[0]
+    sem = np.nan_to_num(np.nanstd(st["Z"], 0) / np.sqrt(M))
+    sem_val = np.nan_to_num(np.nanstd(st["Z_val"], 0) / np.sqrt(M))
+    for score_name in ["ensemble", "ensemble_ci", "single_run"]:
+        S_act = cal_act = None
+        if score_name == "single_run":
+            S, cal = st["Z"][0], st["Z_val"][0]
+        elif score_name == "ensemble":
+            S, cal = st["S"], st["S_val"]
+        else:   # confidence-interval rule: review on the upper bound, act on the lower bound
+            S, cal = st["S"] + args.kappa * sem, st["S_val"] + args.kappa * sem_val
+            S_act, cal_act = st["S"] - args.kappa * sem, st["S_val"] - args.kappa * sem_val
         cal = cal[np.isfinite(cal)]
+        cal_act = cal if cal_act is None else cal_act[np.isfinite(cal_act)]
         k = min(max(int(B * nvd), 1), len(cal))
         q0 = float(np.sort(cal)[-k])
         sd = float(np.std(cal)) or 1.0
@@ -167,17 +183,17 @@ def main():
         # Warm start: the validation threshold that would give ~B_auto/day (top-1 when < 1/day).
         # The act tier's budget is ~100x smaller than the review budget, so its controller needs
         # a proportionally larger step; we sweep it (in validation-score SDs).
-        settings = [(None, None)] + [(b, e) for b in [0.25, 1.0] for e in [0.02, 0.2, 1.0]]
+        settings = [(None, None)] + [(b, e) for b in [0.25, 1.0] for e in [0.2, 1.0]]
         for b_auto, eta_a in settings:
             for audit in [0.05]:
                 rng = np.random.default_rng(0)
                 ka = max(int((b_auto or 1) * nvd), 1)
-                q_act0 = float(np.sort(cal)[-ka])
+                q_act0 = float(np.sort(cal_act)[-ka])
                 case_of, cases = replay_tiers(
                     S, st["t1"], st["w"], st["y"], lin, B, q0, 0.02 * sd,
                     2.0, audit if b_auto is not None else 0.0,
                     (eta_a or 0.02) * sd, q_act0 if b_auto is not None else np.inf, rng,
-                    B_auto=b_auto)
+                    B_auto=b_auto, S_act=S_act)
                 r = evaluate(st, case_of, cases, B, tz)
                 fa = [c for c in cases if c["tier"] == "A" and not c["y"]]
                 nd = max(len(np.unique(day_of(st["t1"], tz))), 1)
