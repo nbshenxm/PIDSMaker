@@ -161,6 +161,32 @@ def _attack_level(attacks, present, handled, automated):
             "attacks_automated": sum(bool(a & automated) for a in in_test)}
 
 
+def _with_borrower(labels, manifest, artifact_dir):
+    """Identity-borrowing runs re-attribute attack events to a benign process (code injection).
+    That process is compromised, so it joins every attack's ground truth; unit labels already
+    restrict credit to the attack's time window."""
+    argv = manifest.get("argv", [])
+    if "--adversary" not in argv:
+        return labels
+    spec = json.loads(argv[argv.index("--adversary") + 1])
+    if not spec.get("borrow"):
+        return labels
+    import glob
+    for p in glob.glob(os.path.join(artifact_dir, "construction", "construction", "*",
+                                    manifest["dataset"], "adversary.json")):
+        with open(p, encoding="utf-8") as f:
+            rec = json.load(f)
+        if rec.get("spec") == spec and rec.get("borrower") is not None:
+            b = int(rec["borrower"])
+            labels = dict(labels, attacks=[dict(a, nids=sorted(set(a["nids"]) | {b}))
+                                           for a in labels["attacks"]])
+            labels["malicious_nids"] = sorted(set(labels["malicious_nids"]) | {b})
+            print(f"  borrower {b} added to the ground truth")
+            return labels
+    print("  WARNING: borrow run without a recorded borrower")
+    return labels
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--artifact_dir", required=True)
@@ -178,6 +204,7 @@ def main():
     members = data.group_manifests(data.load_manifests(
         args.artifact_dir, args.system, args.dataset, args.group))[(args.system, args.dataset, args.group)]
     labels, meta = data.labels_for(members[0], args.artifact_dir)
+    labels = _with_borrower(labels, members[0], args.artifact_dir)
     st = ensemble_stream(members, labels, cache_dir=cache)
     tz = labels.get("timezone", "US/Eastern")
     B = args.budget
