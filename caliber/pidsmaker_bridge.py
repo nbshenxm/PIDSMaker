@@ -225,10 +225,47 @@ def cmd_lineage(argv):
     print(f"lineage: {len(first)} child->parent links ({len(rows)} creation pairs) -> {out}")
 
 
+def cmd_train_procs(argv):
+    """Executables seen during the TRAINING period (allowlist baseline, Guerra et al.).
+
+    Writes {artifact_dir}/caliber/labels/<dataset>__train_procs.csv.gz with one row per process
+    active in a training day: node, path (executable path from subject_node_table)."""
+    from datetime import datetime, timedelta
+    from pidsmaker.utils.utils import datetime_to_ns_time_US, init_database_connection
+
+    cfg = load_cfg(argv)
+    dataset = argv[1]
+    tz = str(getattr(cfg.dataset, "timezone", "") or "")
+    if tz.upper() == "UTC":
+        import pytz
+        to_ns = lambda s: int(pytz.utc.localize(datetime.strptime(s, "%Y-%m-%d %H:%M:%S")).timestamp() * 1e9)
+    else:
+        to_ns = datetime_to_ns_time_US
+    cur, conn = init_database_connection(cfg)
+    cur.execute("SELECT index_id, path FROM subject_node_table")
+    path_of = {str(r[0]): str(r[1]) for r in cur.fetchall()}
+    active = set()
+    for d in cfg.dataset.train_dates:
+        nxt = (datetime.strptime(d, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+        cur.execute("SELECT DISTINCT src_index_id FROM event_table "
+                    "WHERE timestamp_rec >= %s AND timestamp_rec < %s",
+                    (to_ns(f"{d} 00:00:00"), to_ns(f"{nxt} 00:00:00")))
+        active |= {str(r[0]) for r in cur.fetchall() if str(r[0]) in path_of}
+    out_dir = os.path.join(_artifact_dir(argv), "caliber", "labels")
+    os.makedirs(out_dir, exist_ok=True)
+    out = os.path.join(out_dir, f"{dataset}__train_procs.csv.gz")
+    with gzip.open(out, "wt", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["node", "path"])
+        for n in sorted(active, key=int):
+            w.writerow([n, path_of[n]])
+    print(f"train_procs: {len(active)} processes active on {len(cfg.dataset.train_dates)} training days -> {out}")
+
+
 def main():
     p = argparse.ArgumentParser()
     cmds = {"manifest": cmd_manifest, "labels": cmd_labels, "lineage": cmd_lineage,
-            "drop_unpacked": cmd_drop_unpacked}
+            "drop_unpacked": cmd_drop_unpacked, "train_procs": cmd_train_procs}
     p.add_argument("command", choices=list(cmds))
     ns, rest = p.parse_known_args()
     if len(rest) < 2:

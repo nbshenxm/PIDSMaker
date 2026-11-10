@@ -60,6 +60,7 @@ def ensemble_stream(members, labels, window="batch", epoch_rule="min_val_loss", 
         "Z": np.vstack(zs_test),                   # per-member scores (for vote splits)
         "Z_val": np.vstack(zs_val),
         "t_val": tv["t1"].values,                  # validation unit times (rate calibration)
+        "node_val": val_idx.get_level_values("node").values,
         "partner": tt["partner"].values if "partner" in tt else None,
     }
 

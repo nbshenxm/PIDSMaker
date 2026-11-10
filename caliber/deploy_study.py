@@ -128,6 +128,34 @@ def fixed_threshold_cases(cand, policy, q0, B):
     return open_t[keep], score[keep], [case_att[i] for i in np.flatnonzero(keep)]
 
 
+def allowlist_scores(nodes, artifact_dir, dataset, meta):
+    """Allowlist detector (after Guerra et al.): a process is suspicious if its executable name or
+    path was not seen during training. Graded so that a budget can be applied: unseen name (2) +
+    unseen path (1) + rarity of the name in training (1/(1+count)). Non-process units never
+    alert (-inf), as in the original, which scores process nodes only."""
+    import gzip
+    import pandas as pd
+    from collections import Counter
+    p = os.path.join(artifact_dir, "caliber", "labels", f"{dataset}__train_procs.csv.gz")
+    tp = pd.read_csv(p, dtype={"path": str}).fillna("")
+    base = lambda s: s.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+    name_cnt = Counter(base(x) for x in tp["path"])
+    train_paths = set(tp["path"])
+    sub = meta[meta["type"] == "subject"]
+    path_of = dict(zip(sub["node"].astype(np.int64), sub["path"].fillna("").astype(str)))
+    out = np.full(len(nodes), -np.inf)
+    cache = {}
+    for i, n in enumerate(nodes.astype(np.int64)):
+        if n not in path_of:
+            continue
+        if n not in cache:
+            path = path_of[n]
+            nm = base(path)
+            cache[n] = 2.0 * (nm not in name_cnt) + 1.0 * (path not in train_paths) + 1.0 / (1 + name_cnt[nm])
+        out[i] = cache[n]
+    return out
+
+
 def one_deployment(S, S_val, st, keys, B, nvd, policy, attacks, tz, cand=None):
     cal = S_val[np.isfinite(S_val)]
     k = min(max(int(B * nvd), 1), len(cal))
@@ -161,6 +189,8 @@ def main():
     ap.add_argument("--group", default="da39a3ee5e")
     ap.add_argument("--subsets", type=int, default=5, help="random ensembles per size")
     ap.add_argument("--policies", default="static,prevday,daytopB,hindsight,caliber")
+    ap.add_argument("--detector", default="model", choices=["model", "allowlist"],
+                    help="allowlist: executable-novelty baseline on the same units (Guerra et al.)")
     args = ap.parse_args()
     cache = os.path.join(args.artifact_dir, "caliber", "cache")
     members = data.group_manifests(data.load_manifests(
@@ -174,6 +204,11 @@ def main():
             if parents is not None else st["node"].astype(np.int64))
     nvd = max(len(members[0].get("val_dates", [])), 1)
     Z, Zv, M = st["Z"], st["Z_val"], st["Z"].shape[0]
+    if args.detector == "allowlist":
+        # same units as the learned detector, scored by executable novelty (one "member")
+        Z = allowlist_scores(st["node"], args.artifact_dir, args.dataset, meta)[None, :]
+        Zv = allowlist_scores(st["node_val"], args.artifact_dir, args.dataset, meta)[None, :]
+        M = 1
     rng = np.random.default_rng(0)
     configs = [("single", [m]) for m in range(M)]
     for size in sorted({3, 5, M}):
@@ -197,7 +232,8 @@ def main():
                 rows.append({"B": B, "runs": kind, "members": subset, "policy": policy, **r})
         print(f"B={B} done", flush=True)
     rep = os.path.join(args.artifact_dir, "caliber", "reports")
-    out = os.path.join(rep, f"deploy_{args.system}_{args.dataset}_{args.group}.json")
+    tag = args.system if args.detector == "model" else "allowlist"
+    out = os.path.join(rep, f"deploy_{tag}_{args.dataset}_{args.group}.json")
     with open(out, "w", encoding="utf-8") as fh:
         json.dump(rows, fh)
     summarize(rows, f"{args.system}/{args.dataset}")
