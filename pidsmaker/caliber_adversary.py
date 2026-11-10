@@ -29,6 +29,7 @@ from collections import Counter
 EQUIV = {"EVENT_SENDTO": "EVENT_SENDMSG", "EVENT_SENDMSG": "EVENT_SENDTO",
          "EVENT_RECVFROM": "EVENT_RECVMSG", "EVENT_RECVMSG": "EVENT_RECVFROM"}
 NS_H = 3600 * 10**9
+_CTX = None          # transform context of the current construction run (cfg holds only primitives)
 
 
 def spec_of(cfg):
@@ -37,7 +38,11 @@ def spec_of(cfg):
 
 
 def prepare(cfg, indexid2msg):
-    """Apply renaming to the label table and build the context for event transforms."""
+    """Apply renaming to the label table and build the context for event transforms.
+    Returns (label table, True) when an adversary is set, else (label table, None); the
+    context itself is kept in this module because yacs configs hold only primitive types."""
+    global _CTX
+    _CTX = None
     spec = spec_of(cfg)
     if not spec:
         return indexid2msg, None
@@ -45,10 +50,10 @@ def prepare(cfg, indexid2msg):
     from pidsmaker.utils.utils import log
 
     gt, _, _ = get_ground_truth(cfg)
-    gt = {int(n) for n in gt}
+    gt = {str(n) for n in gt}             # index ids are strings in indexid2msg and event rows
     benign_labels = Counter()
     for nid, (ntype, label) in indexid2msg.items():
-        if int(nid) not in gt:
+        if str(nid) not in gt:
             benign_labels[(ntype, label)] += 1
     top_label = {}
     for (ntype, label), c in benign_labels.most_common():
@@ -61,20 +66,40 @@ def prepare(cfg, indexid2msg):
             if nid in indexid2msg:
                 ntype, label = indexid2msg[nid]
                 if ntype in ("subject", "file") and label not in seen_benign and ntype in top_label:
-                    indexid2msg[nid] = (ntype, top_label[ntype])
+                    indexid2msg[nid] = [ntype, top_label[ntype]]
                     renamed += 1
     # frequent benign files (targets for injected reads), by label frequency
     files = [nid for nid, (t, l) in indexid2msg.items()
-             if t == "file" and int(nid) not in gt and benign_labels[(t, l)] > 1]
+             if t == "file" and str(nid) not in gt and benign_labels[(t, l)] > 1]
     files.sort(key=lambda n: -benign_labels[tuple(indexid2msg[n])])
     attack_procs = sorted(n for n in gt if n in indexid2msg and indexid2msg[n][0] == "subject")
     attacks = [(int(s), int(e)) for _, s, e in ground_truth_attacks(cfg)]
     ctx = {"spec": spec, "gt": gt, "files": files[:200], "attack_procs": attack_procs,
            "attacks": attacks, "borrower": None, "n_syn": 0, "test_dates": set(cfg.dataset.test_dates)}
+    ctx["proc_set"] = set(attack_procs)
     ctx["prime_rows"] = _priming_rows(ctx, spec.get("prime", 0))
     log(f"[adversary] spec={spec} renamed={renamed} attack_procs={len(attack_procs)} "
         f"benign_file_pool={len(ctx['files'])} priming_events={len(ctx['prime_rows'])}")
-    return indexid2msg, ctx
+    if not attack_procs and not renamed:
+        raise RuntimeError("adversary: no ground-truth attack nodes matched the label table")
+    ctx["renamed"] = renamed
+    _CTX = ctx
+    _save(cfg, ctx)
+    return indexid2msg, True
+
+
+def _save(cfg, ctx):
+    """Record what the transform did next to the construction artifacts. The borrower (the
+    benign process the attacker injects into) is compromised from the attack's start, so the
+    label export treats it as attack ground truth during attack windows."""
+    import os
+    d = cfg.construction._task_path
+    os.makedirs(d, exist_ok=True)
+    rec = {"spec": ctx["spec"], "renamed": ctx.get("renamed", 0),
+           "attack_procs": len(ctx["attack_procs"]), "synthetic_events": ctx["n_syn"],
+           "borrower": ctx["borrower"][1] if ctx["borrower"] else None}
+    with open(os.path.join(d, "adversary.json"), "w", encoding="utf-8") as f:
+        json.dump(rec, f, indent=1)
 
 
 def _syn(ctx, src, dst, op, t):
@@ -103,20 +128,21 @@ def _in_attack(ctx, t):
 
 def transform(cfg, rows, date):
     """Transform one time-ordered chunk of event rows of `date` (8-tuples as in event_table)."""
-    ctx = getattr(cfg, "_adv_ctx", None)
+    ctx = _CTX
     if ctx is None or not rows or date not in ctx["test_dates"]:
         return rows
-    spec, gt = ctx["spec"], ctx["gt"]
+    spec, gt, procs = ctx["spec"], ctx["gt"], ctx["proc_set"]
     if spec.get("borrow") and ctx["borrower"] is None:
-        cnt = Counter(r[1] for r in rows if r[1] not in gt)
+        cnt = Counter((r[0], r[1]) for r in rows if r[1] not in gt)
         if cnt:
-            ctx["borrower"] = (cnt.most_common(1)[0][0])
+            ctx["borrower"] = cnt.most_common(1)[0][0]       # (node uuid, index id)
+            _save(cfg, ctx)
     out = []
     n_dil = int(spec.get("dilute", 0) or 0)
     for r in rows:
         src_node, src, op, dst_node, dst, ev, t, _id = r
         attack_edge = (src in gt or dst in gt) and _in_attack(ctx, t)
-        if attack_edge and src in gt:
+        if attack_edge and src in procs:            # an attack process acts
             if n_dil and ctx["files"]:
                 for i in range(n_dil):
                     out.append(_syn(ctx, src, ctx["files"][(ctx["n_syn"] + i) % len(ctx["files"])],
@@ -124,7 +150,7 @@ def transform(cfg, rows, date):
             if spec.get("substitute") and op in EQUIV:
                 op = EQUIV[op]
             if spec.get("borrow") and ctx["borrower"] is not None:
-                src_node, src = "adv-borrow", ctx["borrower"]
+                src_node, src = ctx["borrower"]
         out.append((src_node, src, op, dst_node, dst, ev, t, _id))
     if ctx["prime_rows"]:
         lo, hi = rows[0][6], rows[-1][6]

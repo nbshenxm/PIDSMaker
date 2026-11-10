@@ -123,7 +123,7 @@ def cmd_drop_unpacked(argv):
     cfg = load_cfg(argv)
     tp = cfg.training._task_path
     final_dir = getattr(cfg.training, "_edge_losses_final_dir", cfg.training._edge_losses_dir)
-    if cfg.training._edge_losses_dir == final_dir or not os.path.isdir(tp):
+    if cfg.training._edge_losses_dir == final_dir or not os.path.exists(os.path.join(tp, "done.txt")):
         return
     if not glob.glob(os.path.join(final_dir, "test", "model_epoch_*.parquet")):
         shutil.rmtree(tp)
