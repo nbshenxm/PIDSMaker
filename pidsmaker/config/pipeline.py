@@ -450,6 +450,13 @@ def set_task_paths(cfg, subtask_concat_value=None):
 
     cfg.training._trained_models_dir = os.path.join(cfg.training._task_path, "trained_models/")
     cfg.training._edge_losses_dir = os.path.join(cfg.training._task_path, "edge_losses/")
+    cfg.training._edge_losses_final_dir = cfg.training._edge_losses_dir
+    _scratch = os.environ.get("CALIBER_EDGE_SCRATCH")
+    if _scratch:
+        # CALIBER: per-batch edge-loss CSVs (thousands per epoch) go to node-local disk;
+        # caliber.pack writes one Parquet per (split, epoch) into _edge_losses_final_dir.
+        key = hashlib.sha1(cfg.training._task_path.encode()).hexdigest()[:16]
+        cfg.training._edge_losses_dir = os.path.join(_scratch, key, "edge_losses/")
     cfg.training._magic_dir = os.path.join(cfg.training._task_path, "magic/")
     cfg.evaluation._precision_recall_dir = os.path.join(
         cfg.evaluation._task_path, "precision_recall_dir/"

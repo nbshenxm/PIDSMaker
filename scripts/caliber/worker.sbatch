@@ -42,6 +42,20 @@ export CUBLAS_WORKSPACE_CONFIG=:4096:8
 export PYTHONHASHSEED=0
 export NLTK_DATA="${NLTK_DATA:-${HOME}/nltk_data}"
 export CALIBER_PACK=1   # pack edge-loss CSVs after each member (file-count quota)
+# Per-batch edge-loss CSVs (up to ~130k files and ~8 GB per THEIA_E5 member) are written to
+# node-local disk and only the packed Parquet reaches the fileset (1.024M file quota).
+export CALIBER_EDGE_SCRATCH="${TMPDIR:-/tmp}/caliber_edges_${JOB}"
+trap 'rm -rf "${CALIBER_EDGE_SCRATCH}"' EXIT
+# Do not start a task when the fileset is close to its file-count quota.
+MAX_FILES_FRAC="${MAX_FILES_FRAC:-0.85}"
+quota_ok() {
+    local line
+    line=$(/usr/lpp/mmfs/bin/mmlsquota -j benchmarking_PIDS fs1 2>/dev/null | awk '$2=="FILESET"')
+    [[ -z "${line}" ]] && return 0
+    # fields after "|": files quota limit ...
+    awk -v f="${MAX_FILES_FRAC}" '{ for (i = 1; i <= NF; i++) if ($i == "|") break;
+                                    exit !($(i+1) < f * $(i+2)) }' <<< "${line}"
+}
 python -c "import torch; print('worker', '${JOB}', 'on', '$(hostname)', 'cuda:', torch.cuda.is_available())"
 
 START=$(date +%s)
@@ -68,6 +82,10 @@ idle_since=$(date +%s)
 while true; do
     if (( $(remaining_min) < MIN_REMAINING_MIN )); then
         echo "[$(date)] less than ${MIN_REMAINING_MIN} min left; exiting"; break
+    fi
+    if ! quota_ok; then
+        echo "[$(date)] fileset above ${MAX_FILES_FRAC} of its file quota; waiting"
+        idle_since=$(date +%s); sleep 300; continue
     fi
     task=$(claim)
     if [[ -z "${task}" ]]; then
@@ -97,7 +115,11 @@ while true; do
         mv "${task}" "${QUEUE}/done/${name}"
         echo "[$(date)] DONE  ${name}"
     else
+        # the run's CSVs on scratch are lost: make a retry retrain rather than re-evaluate
+        python -m caliber.pidsmaker_bridge drop_unpacked "${SYSTEM}" "${DATASET}" \
+            --artifact_dir "${ARTIFACT_DIR}" --training.seed "${SEED}" ${ARGS} >> "${log}" 2>&1
         mv "${task}" "${QUEUE}/failed/${name}"
         echo "[$(date)] FAIL  ${name} -> see ${log}"
     fi
+    rm -rf "${CALIBER_EDGE_SCRATCH}"
 done

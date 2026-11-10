@@ -26,7 +26,8 @@ import pyarrow.parquet as pq
 EDGE_COLS = ["loss", "srcnode", "dstnode", "time", "edge_type"]
 
 
-def pack_epoch_dir(d):
+def pack_epoch_dir(d, out=None):
+    """Pack CSV directory d into Parquet file out (default: d + '.parquet'), then remove d."""
     files = sorted(f for f in os.listdir(d) if f.endswith(".csv"))
     if not files:
         return 0
@@ -41,7 +42,8 @@ def pack_epoch_dir(d):
     meta = dict(table.schema.metadata or {})
     meta[b"caliber_batch_files"] = json.dumps(files).encode()
     table = table.replace_schema_metadata(meta)
-    out = d.rstrip("/") + ".parquet"
+    out = out or (d.rstrip("/") + ".parquet")
+    os.makedirs(os.path.dirname(out), exist_ok=True)
     tmp = out + ".tmp"
     pq.write_table(table, tmp, compression="zstd")
     if pq.ParquetFile(tmp).metadata.num_rows != len(df):
@@ -52,12 +54,17 @@ def pack_epoch_dir(d):
     return len(files)
 
 
-def pack_task(task_path, log=print):
+def pack_task(task_path, log=print, src_edge_dir=None):
+    """src_edge_dir: where the CSVs are (node-local scratch, see CALIBER_EDGE_SCRATCH).
+    Parquet files always go to <task_path>/edge_losses/<split>/model_epoch_<k>.parquet."""
+    src = src_edge_dir or os.path.join(task_path, "edge_losses")
+    dst = os.path.join(task_path, "edge_losses")
     removed = 0
     for split in ("val", "test"):
-        for d in sorted(glob.glob(os.path.join(task_path, "edge_losses", split, "model_epoch_*"))):
+        for d in sorted(glob.glob(os.path.join(src, split, "model_epoch_*"))):
             if os.path.isdir(d):
-                removed += pack_epoch_dir(d)
+                out = os.path.join(dst, split, os.path.basename(d.rstrip("/")) + ".parquet")
+                removed += pack_epoch_dir(d, out)
     log(f"packed {task_path}: {removed} CSV files -> parquet")
     return removed
 

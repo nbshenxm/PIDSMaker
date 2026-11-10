@@ -16,6 +16,7 @@ e.g. a `--training.stable_optim=True` ensemble gets its own.
 import argparse
 import gzip
 import csv
+import glob
 import hashlib
 import json
 import os
@@ -76,7 +77,8 @@ def cmd_manifest(argv):
     cfg = load_cfg(argv)
     system, dataset = argv[0], argv[1]
     gid, canon = group_id(argv)
-    edge_dir = cfg.training._edge_losses_dir
+    edge_dir = cfg.training._edge_losses_dir            # where the CSVs are now (maybe scratch)
+    final_dir = getattr(cfg.training, "_edge_losses_final_dir", edge_dir)
     m = {
         "system": system,
         "dataset": dataset,
@@ -85,7 +87,7 @@ def cmd_manifest(argv):
         "seed": int(cfg.training.seed),
         "argv": argv,
         "training_task_path": cfg.training._task_path,
-        "edge_losses_dir": edge_dir,
+        "edge_losses_dir": final_dir,
         "evaluation_task_path": cfg.evaluation._task_path,
         "val_epochs": _list_epochs(edge_dir, "val"),
         "test_epochs": _list_epochs(edge_dir, "test"),
@@ -108,7 +110,24 @@ def cmd_manifest(argv):
     if os.environ.get("CALIBER_PACK") == "1":
         # Collapse per-batch CSVs into one Parquet per (split, epoch): file-count quota.
         from caliber.pack import pack_task
-        pack_task(cfg.training._task_path)
+        pack_task(cfg.training._task_path, src_edge_dir=edge_dir)
+    elif edge_dir != final_dir:
+        raise RuntimeError("edge losses are on node-local scratch; set CALIBER_PACK=1 to keep them")
+
+
+def cmd_drop_unpacked(argv):
+    """After a failed run whose edge losses lived on node-local scratch: if training finished
+    (done.txt) but no packed test losses exist, delete the training task so a retry retrains
+    instead of evaluating losses that are gone."""
+    import shutil
+    cfg = load_cfg(argv)
+    tp = cfg.training._task_path
+    final_dir = getattr(cfg.training, "_edge_losses_final_dir", cfg.training._edge_losses_dir)
+    if cfg.training._edge_losses_dir == final_dir or not os.path.isdir(tp):
+        return
+    if not glob.glob(os.path.join(final_dir, "test", "model_epoch_*.parquet")):
+        shutil.rmtree(tp)
+        print(f"dropped unpacked training task {tp}")
 
 
 def _artifact_dir(argv):
@@ -204,11 +223,13 @@ def cmd_lineage(argv):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("command", choices=["manifest", "labels", "lineage"])
+    cmds = {"manifest": cmd_manifest, "labels": cmd_labels, "lineage": cmd_lineage,
+            "drop_unpacked": cmd_drop_unpacked}
+    p.add_argument("command", choices=list(cmds))
     ns, rest = p.parse_known_args()
     if len(rest) < 2:
-        sys.exit("usage: python -m caliber.pidsmaker_bridge {manifest,labels} SYSTEM DATASET [args...]")
-    {"manifest": cmd_manifest, "labels": cmd_labels, "lineage": cmd_lineage}[ns.command](rest)
+        sys.exit("usage: python -m caliber.pidsmaker_bridge {" + ",".join(cmds) + "} SYSTEM DATASET [args...]")
+    cmds[ns.command](rest)
 
 
 if __name__ == "__main__":
