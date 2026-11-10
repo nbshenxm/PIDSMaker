@@ -8,7 +8,7 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=160G
 #SBATCH --output=/fs1/projects/benchmarking_PIDS/sherwin_dir/caliber_queue/logs/%x-%j.out
-set -uo pipefail
+set -o pipefail
 S=/fs1/projects/benchmarking_PIDS/sherwin_dir
 A=$S/artifacts_v3/
 cd $S/PIDSMaker3
@@ -17,6 +17,7 @@ module load miniforge3 >/dev/null 2>&1
 conda activate pids3
 export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}
 export PYTHONPATH=$PWD
+set -u
 DETECTOR="${DETECTOR:-model}"
 for pair in $PAIRS; do
     system=${pair%%:*}; dataset=${pair#*:}
