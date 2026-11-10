@@ -128,11 +128,13 @@ def fixed_threshold_cases(cand, policy, q0, B):
     return open_t[keep], score[keep], [case_att[i] for i in np.flatnonzero(keep)]
 
 
-def allowlist_scores(nodes, artifact_dir, dataset, meta):
+def allowlist_scores(nodes, times, artifact_dir, dataset, meta):
     """Allowlist detector (after Guerra et al.): a process is suspicious if its executable name or
-    path was not seen during training. Graded so that a budget can be applied: unseen name (2) +
-    unseen path (1) + rarity of the name in training (1/(1+count)). Non-process units never
-    alert (-inf), as in the original, which scores process nodes only."""
+    path was not seen during training. As an allowlist is operated, an executable alerts when it
+    first appears and is allowlisted once reviewed, so only the first unit of each unseen path
+    carries the novelty score; later units keep only the rarity term. Graded so that a budget can
+    be applied: unseen name (2) + unseen path (1) + rarity of the name in training
+    (1/(1+count)). Non-process units never alert (-inf); the original scores processes only."""
     import gzip
     import pandas as pd
     from collections import Counter
@@ -144,15 +146,20 @@ def allowlist_scores(nodes, artifact_dir, dataset, meta):
     sub = meta[meta["type"] == "subject"]
     path_of = dict(zip(sub["node"].astype(np.int64), sub["path"].fillna("").astype(str)))
     out = np.full(len(nodes), -np.inf)
-    cache = {}
-    for i, n in enumerate(nodes.astype(np.int64)):
+    seen = set()                                    # paths already alerted on (allowlisted)
+    nodes = nodes.astype(np.int64)
+    for i in np.argsort(times, kind="stable"):
+        n = nodes[i]
         if n not in path_of:
             continue
-        if n not in cache:
-            path = path_of[n]
-            nm = base(path)
-            cache[n] = 2.0 * (nm not in name_cnt) + 1.0 * (path not in train_paths) + 1.0 / (1 + name_cnt[nm])
-        out[i] = cache[n]
+        path = path_of[n]
+        nm = base(path)
+        novelty = 2.0 * (nm not in name_cnt) + 1.0 * (path not in train_paths)
+        if novelty and path in seen:
+            novelty = 0.0
+        elif novelty:
+            seen.add(path)
+        out[i] = novelty + 1.0 / (1 + name_cnt[nm])
     return out
 
 
@@ -208,8 +215,8 @@ def main():
     Z, Zv, M = st["Z"], st["Z_val"], st["Z"].shape[0]
     if args.detector == "allowlist":
         # same units as the learned detector, scored by executable novelty (one "member")
-        Z = allowlist_scores(st["node"], args.artifact_dir, args.dataset, meta)[None, :]
-        Zv = allowlist_scores(st["node_val"], args.artifact_dir, args.dataset, meta)[None, :]
+        Z = allowlist_scores(st["node"], st["t1"], args.artifact_dir, args.dataset, meta)[None, :]
+        Zv = allowlist_scores(st["node_val"], st["t_val"], args.artifact_dir, args.dataset, meta)[None, :]
         M = 1
     rng = np.random.default_rng(0)
     configs = [("single", [m]) for m in range(M)]
