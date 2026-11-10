@@ -113,6 +113,15 @@ def fixed_threshold_cases(cand, policy, q0, B):
             q_of_day[d] = prev
             s = np.sort(score[days == d])
             prev = float(s[-min(int(B), len(s))]) if len(s) else prev
+    elif policy == "daytopB":                       # Ho et al. '17: the day's top B, at day end
+        keep = np.zeros(len(score), bool)
+        release = open_t.copy()
+        for d in np.unique(days):
+            ix = np.flatnonzero(days == d)
+            top = ix[np.argsort(-score[ix])[:int(B)]]
+            keep[top] = True
+            release[ix] = open_t[ix].max()           # ranked once the day's data are in
+        return release[keep], score[keep], [case_att[i] for i in np.flatnonzero(keep)]
     else:
         raise ValueError(policy)
     keep = score >= np.array([q_of_day[d] for d in days])
@@ -123,7 +132,7 @@ def one_deployment(S, S_val, st, keys, B, nvd, policy, attacks, tz, cand=None):
     cal = S_val[np.isfinite(S_val)]
     k = min(max(int(B * nvd), 1), len(cal))
     q0 = float(np.sort(cal)[-k])
-    if policy in ("hindsight", "prevday"):
+    if policy in ("hindsight", "prevday", "daytopB"):
         open_t, score, case_att = fixed_threshold_cases(cand, policy, q0, B)
     else:
         eta = 0.0 if policy == "static" else 0.02 * (float(np.std(cal)) or 1.0)
@@ -151,7 +160,7 @@ def main():
     ap.add_argument("--dataset", required=True)
     ap.add_argument("--group", default="da39a3ee5e")
     ap.add_argument("--subsets", type=int, default=5, help="random ensembles per size")
-    ap.add_argument("--policies", default="static,prevday,hindsight,caliber")
+    ap.add_argument("--policies", default="static,prevday,daytopB,hindsight,caliber")
     args = ap.parse_args()
     cache = os.path.join(args.artifact_dir, "caliber", "cache")
     members = data.group_manifests(data.load_manifests(
