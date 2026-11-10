@@ -185,7 +185,9 @@ def cmd_labels(argv):
     print(f"node_meta: {len(meta)} nodes -> {out_dir}")
 
 
-PROCESS_CREATION_OPS = ("EVENT_FORK", "EVENT_CLONE")
+# Process-creation operations per data source (DARPA TC, EDR datasets, OpTC). Links are kept
+# only when both endpoints are processes (OpTC's CREATE also covers files).
+PROCESS_CREATION_OPS = ("EVENT_FORK", "EVENT_CLONE", "PROCESS_EXECUTED", "CREATE")
 
 
 def cmd_lineage(argv):
@@ -199,11 +201,13 @@ def cmd_lineage(argv):
     cfg = load_cfg(argv)
     dataset = argv[1]
     cur, conn = init_database_connection(cfg)
+    cur.execute("SELECT index_id FROM subject_node_table")
+    procs = {str(r[0]) for r in cur.fetchall()}
     cur.execute(
         "SELECT dst_index_id, src_index_id, MIN(timestamp_rec) FROM event_table "
         "WHERE operation IN %s AND src_index_id <> dst_index_id "
         "GROUP BY dst_index_id, src_index_id", (PROCESS_CREATION_OPS,))
-    rows = cur.fetchall()
+    rows = [r for r in cur.fetchall() if str(r[0]) in procs and str(r[1]) in procs]
     # keep the earliest creation event per child
     first = {}
     for child, parent, t in rows:
