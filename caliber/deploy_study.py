@@ -28,7 +28,7 @@ from caliber import data
 from caliber.budget import DAY, HOUR
 from caliber.lineage import lineage_keys, load_parents, process_predicate
 from caliber.online import day_of, ensemble_stream
-from caliber.tiers import _with_borrower, replay_tiers
+from caliber.tiers import _with_borrower, replay_tiers, review_step
 
 BUDGETS = [20, 50, 100, 200, 500]
 MAX_WAIT_DAYS = 3
@@ -163,12 +163,14 @@ def one_deployment(S, S_val, st, keys, B, nvd, policy, attacks, tz, cand=None):
     if policy in ("hindsight", "prevday", "daytopB"):
         open_t, score, case_att = fixed_threshold_cases(cand, policy, q0, B)
     else:
-        eta = 0.0 if policy == "static" else 0.02 * (float(np.std(cal)) or 1.0)
+        eta = 0.0 if policy == "static" else review_step(cal, B)
         case_of, cases = replay_tiers(S, st["t1"], st["w"], st["y"], keys, B, q0, eta, 2.0, 0.0,
                                       0.0, np.inf, np.random.default_rng(0))
         open_t, score, case_att = cases_of(case_of, cases, S, st["t1"], st["node"], st["y"], attacks)
     days = day_of(open_t[np.isfinite(open_t)], tz) if len(open_t) else np.array([])
-    test_days = np.unique(day_of(st["t1"], tz))
+    # days with data (a few spill-over units across midnight do not make a monitored day)
+    all_days, n_units = np.unique(day_of(st["t1"], tz), return_counts=True)
+    test_days = all_days[n_units >= 0.05 * np.median(n_units)]
     per_day = np.array([np.sum(days == d) for d in test_days], float)
     reviewed = analyst_queue(open_t, score, B, float(st["t1"].max()))
     present = [k_ for k_, a in enumerate(attacks) if set(a["nids"]) & set(st["node"][st["y"]])]
