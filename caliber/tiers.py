@@ -30,7 +30,7 @@ from scipy.stats import beta
 
 from caliber import data
 from caliber.budget import DAY, HOUR
-from caliber.lineage import lineage_keys, load_parents, process_predicate
+from caliber.lineage import case_keys
 from caliber.online import day_of, ensemble_stream
 
 # Review-controller step: a full day's budget error (B surplus cases) moves the threshold by
@@ -49,20 +49,34 @@ def wilson_lower(pos, n, conf=0.9):
     return float(beta.ppf(1 - conf, pos + 0.5, n - pos + 0.5))      # Jeffreys interval
 
 
+def flood_cap_for(B):
+    """Default per-batch cap on new individual cases: one hour of the review budget."""
+    return max(1, int(np.ceil(B / 24.0)))
+
+
 def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
-                 max_gap_ns=HOUR, window_audits=50, B_auto=None, S_act=None):
+                 max_gap_ns=HOUR, window_audits=50, B_auto=None, S_act=None,
+                 flood_cap="auto", refund_delay_ns=0):
     """B_auto: if set, q_act is driven by a false-automation budget instead of a precision
     target: at most ~B_auto benign cases per day may be acted on automatically. Same
     label-free controller as the review budget (Proposition 1): every new tier-A case counts
     immediately and confirmed attacks are refunded. No audit sample is needed for control.
     S_act: statistic for the act tier (default S). With the confidence-interval rule, S is the
     upper bound (a unit is dismissed only if it is confidently below q_rev) and S_act the
-    lower bound (a unit is automated only if it is confidently above q_act)."""
+    lower bound (a unit is automated only if it is confidently above q_act).
+    flood_cap: at most this many new individual cases per batch ("auto": one hour of budget,
+    None: no cap). Alerting units of a batch open cases in descending score order; once the cap
+    is reached, the batch's remaining new alerts join one bulk review case, so a single batch
+    adds at most flood_cap + 1 cases (the N of Proposition 1). Bulk cases are never automated.
+    refund_delay_ns: an analyst's verdict arrives this long after a case opens; a case that is
+    malicious by then (any of its units so far) is refunded at that time, never earlier."""
     S_act = S if S_act is None else S_act
+    cap = flood_cap_for(B) if flood_cap == "auto" else flood_cap
     order = np.lexsort((t, w))
     case_of = np.full(len(S), -1, np.int64)        # case index per alerted unit
-    cases = []                                     # dicts: key, hour, tier, audited
+    cases = []                                     # dicts: tier, audited, y, flood
     open_case = {}
+    pending = []                                   # (due time, case) awaiting a verdict
     q_rev, q_act, clock = q0, max(q_act0, q0), None
     audits = []                                    # recent audited tier-A verdicts
     bounds = np.flatnonzero(np.diff(w[order])) + 1
@@ -71,33 +85,50 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
         tmax = t[ix].max()
         dt = 0.0 if clock is None else min(max(tmax - clock, 0), max_gap_ns) / DAY
         clock = tmax if clock is None else max(clock, tmax)
-        n_rev, n_att_rev, n_auto, n_att_auto = 0, 0, 0, 0
-        for i in ix[S[ix] >= q_rev]:
+        n_rev, n_auto, opened, bulk = 0, 0, 0, None
+        al = ix[S[ix] >= q_rev]
+        for i in al[np.argsort(-S[al], kind="stable")]:
             kh = (keys[i], int(t[i] // HOUR))
             c = open_case.get(kh)
+            if c is None and cap is not None and opened >= cap:
+                if bulk is None:               # flood: one bulk review case for the rest
+                    cases.append({"tier": "B", "audited": False, "y": False, "flood": True})
+                    bulk = len(cases) - 1
+                    n_rev += 1
+                    pending.append((t[i] + refund_delay_ns, bulk))
+                c = open_case[kh] = bulk
             if c is None:
                 tier = "A" if S_act[i] >= q_act else "B"
                 aud = tier == "A" and rng.random() < audit
-                cases.append({"tier": tier, "audited": aud, "y": bool(y[i])})
+                cases.append({"tier": tier, "audited": aud, "y": False, "flood": False})
                 c = len(cases) - 1
                 open_case[kh] = c
-                if tier == "B" or aud:
-                    n_rev += 1
-                    n_att_rev += int(y[i])
-                if tier == "A":
-                    n_auto += 1
-                    n_att_auto += int(y[i])
+                opened += 1
+                n_rev += int(tier == "B" or aud)
+                n_auto += int(tier == "A")
+                pending.append((t[i] + refund_delay_ns, c))
                 if aud:
                     audits.append(bool(y[i]))
                     audits[:] = audits[-window_audits:]
-            else:
-                cases[c]["y"] = cases[c]["y"] or bool(y[i])
+            cases[c]["y"] = cases[c]["y"] or bool(y[i])
             case_of[i] = c
-        # review budget (tier B + audits); confirmed attacks refunded
-        q_rev += eta * (n_rev - n_att_rev - B * dt)
+        # verdicts that have arrived: confirmed attacks are refunded
+        ref_rev = ref_auto = 0
+        if pending:
+            due = [p for p in pending if p[0] <= clock]
+            pending = [p for p in pending if p[0] > clock]
+            for _, c in due:
+                if cases[c]["y"]:
+                    if cases[c]["tier"] == "A":
+                        ref_auto += 1
+                        ref_rev += int(cases[c]["audited"])
+                    else:
+                        ref_rev += 1
+        # review budget (tier B + audits)
+        q_rev += eta * (n_rev - ref_rev - B * dt)
         if B_auto is not None:
             # false-automation budget: same controller as the review budget
-            q_act += eta_act * (n_auto - n_att_auto - B_auto * dt)
+            q_act += eta_act * (n_auto - ref_auto - B_auto * dt)
         # automation threshold: meet the precision target on audited tier-A cases
         elif len(audits) >= 10:
             lb = wilson_lower(sum(audits), len(audits))
@@ -150,6 +181,7 @@ def evaluate(st, case_of, cases, B, tz, attacks=None):
         "analyst_load_per_day": (nB + float(aud.sum())) / nd,
         "all_to_triage_load_per_day": (nA + nB) / nd,
         "automation_share": nA / max(nA + nB, 1),
+        "flood_cases_per_day": sum(bool(c.get("flood")) for c in cases) / nd,
         "precision_A": float(ylab[tierA].mean()) if nA else float("nan"),
         "precision_B": float(ylab[~tierA].mean()) if nB else float("nan"),
         "attack_entities_automated": len(auto_ent),
@@ -219,12 +251,10 @@ def main():
     st = ensemble_stream(members, labels, cache_dir=cache)
     tz = labels.get("timezone", "US/Eastern")
     B = args.budget
-    parents = load_parents(args.artifact_dir, args.dataset)
-    lin = (lineage_keys(st["node"], st["partner"], parents, process_predicate(parents, meta), 1)
-           if parents is not None else st["node"].astype(np.int64))
+    lin, has_lin = case_keys(st, args.artifact_dir, args.dataset, meta)
     nvd = max(len(members[0].get("val_dates", [])), 1)
     out = {}
-    print(f"== {args.system}/{args.dataset} B={B} lineage={'yes' if parents is not None else 'no'}")
+    print(f"== {args.system}/{args.dataset} B={B} lineage={'yes' if has_lin else 'no'}")
     M = st["Z"].shape[0]
     sem = np.nan_to_num(np.nanstd(st["Z"], 0) / np.sqrt(M))
     sem_val = np.nan_to_num(np.nanstd(st["Z_val"], 0) / np.sqrt(M))
@@ -269,7 +299,7 @@ def main():
                     S, st["t1"], st["w"], st["y"], lin, B, q0, 0.0 if static else review_step(cal, B),
                     2.0, audit if b_auto is not None else 0.0,
                     (eta_a or 0.02) * sd, q_act0 if b_auto is not None else np.inf, rng,
-                    B_auto=b_auto, S_act=S_act)
+                    B_auto=b_auto, S_act=S_act, flood_cap=None if static else "auto")
                 r = evaluate(st, case_of, cases, B, tz, labels.get("attacks"))
                 fa = [c for c in cases if c["tier"] == "A" and not c["y"]]
                 nd = max(len(np.unique(day_of(st["t1"], tz))), 1)

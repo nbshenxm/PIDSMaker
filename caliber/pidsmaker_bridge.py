@@ -225,6 +225,45 @@ def cmd_lineage(argv):
     print(f"lineage: {len(first)} child->parent links ({len(rows)} creation pairs) -> {out}")
 
 
+def cmd_owners(argv):
+    """For every non-process entity, the process that interacts with it most (either direction).
+
+    Node-level detectors report node scores without edges, so a file or socket unit has no
+    partner process; its case key uses this owner instead. Written to
+    {artifact_dir}/caliber/labels/<dataset>__owners.csv.gz with columns object,process."""
+    from pidsmaker.utils.utils import init_database_connection
+
+    cfg = load_cfg(argv)
+    dataset = argv[1]
+    cur, conn = init_database_connection(cfg)
+    cur.execute(
+        "SELECT DISTINCT ON (obj) obj, proc FROM ("
+        "  SELECT e.dst_index_id::text AS obj, e.src_index_id::text AS proc, COUNT(*) AS c"
+        "  FROM event_table e JOIN subject_node_table s ON s.index_id::text = e.src_index_id::text"
+        "  GROUP BY 1, 2"
+        "  UNION ALL"
+        "  SELECT e.src_index_id::text, e.dst_index_id::text, COUNT(*)"
+        "  FROM event_table e JOIN subject_node_table s ON s.index_id::text = e.dst_index_id::text"
+        "  GROUP BY 1, 2"
+        ") t ORDER BY obj, c DESC")
+    rows = cur.fetchall()
+    cur.execute("SELECT index_id::text FROM subject_node_table")
+    procs = {r[0] for r in cur.fetchall()}
+    out_dir = os.path.join(_artifact_dir(argv), "caliber", "labels")
+    os.makedirs(out_dir, exist_ok=True)
+    out = os.path.join(out_dir, f"{dataset}__owners.csv.gz")
+    n = 0
+    with gzip.open(out, "wt", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["object", "process"])
+        for obj, proc in rows:
+            if obj in procs or obj == proc:
+                continue
+            w.writerow([int(obj), int(proc)])
+            n += 1
+    print(f"owners: {n} non-process entities -> {out}")
+
+
 def cmd_train_procs(argv):
     """Executables seen during the TRAINING period (allowlist baseline, Guerra et al.).
 
@@ -265,7 +304,8 @@ def cmd_train_procs(argv):
 def main():
     p = argparse.ArgumentParser()
     cmds = {"manifest": cmd_manifest, "labels": cmd_labels, "lineage": cmd_lineage,
-            "drop_unpacked": cmd_drop_unpacked, "train_procs": cmd_train_procs}
+            "drop_unpacked": cmd_drop_unpacked, "train_procs": cmd_train_procs,
+            "owners": cmd_owners}
     p.add_argument("command", choices=list(cmds))
     ns, rest = p.parse_known_args()
     if len(rest) < 2:

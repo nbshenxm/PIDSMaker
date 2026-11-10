@@ -64,3 +64,32 @@ def process_predicate(parents, node_meta=None):
         procs = set(parents.keys()) | set(parents.values())
     procs_arr = np.fromiter(procs, dtype=np.int64)
     return lambda x: np.isin(np.asarray(x, dtype=np.int64), procs_arr)
+
+
+def load_owners(artifact_dir, dataset):
+    """file/socket -> the process that interacts with it most (node-level detectors report no
+    edges, so a non-process unit has no partner of its own)."""
+    p = os.path.join(artifact_dir, "caliber", "labels", f"{dataset}__owners.csv.gz")
+    if not os.path.exists(p):
+        return None
+    df = pd.read_csv(p)
+    return pd.Series(df["process"].astype(np.int64).values, index=df["object"].astype(np.int64).values)
+
+
+def case_keys(st, artifact_dir, dataset, meta, k=1):
+    """Case key per unit: k-th ancestor of the acting process (Section 'Cases, not units').
+    Returns (keys, has_lineage). Without a process tree, cases fall back to entities."""
+    node = st["node"].astype(np.int64)
+    parents = load_parents(artifact_dir, dataset)
+    if parents is None:
+        return node, False
+    partner = st.get("partner")
+    partner = node.copy() if partner is None else np.asarray(partner, dtype=np.int64)
+    selfloop = partner == node
+    if selfloop.any():
+        owners = load_owners(artifact_dir, dataset)
+        if owners is not None:
+            mapped = pd.Series(node[selfloop]).map(owners)
+            partner = partner.copy()
+            partner[selfloop] = mapped.fillna(pd.Series(node[selfloop])).astype(np.int64).values
+    return lineage_keys(node, partner, parents, process_predicate(parents, meta), k), True

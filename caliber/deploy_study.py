@@ -26,7 +26,7 @@ import numpy as np
 
 from caliber import data
 from caliber.budget import DAY, HOUR
-from caliber.lineage import lineage_keys, load_parents, process_predicate
+from caliber.lineage import case_keys
 from caliber.online import day_of, ensemble_stream
 from caliber.tiers import _with_borrower, replay_tiers, review_step
 
@@ -163,16 +163,22 @@ def allowlist_scores(nodes, times, artifact_dir, dataset, meta):
     return out
 
 
-def one_deployment(S, S_val, st, keys, B, nvd, policy, attacks, tz, cand=None):
+def one_deployment(S, S_val, st, keys, B, nvd, policy, attacks, tz, cand=None,
+                   verdict_delay_ns=8 * HOUR):
+    """policy: static | prevday | daytopB | hindsight | caliber | caliber_nocap (no flood cap)."""
     cal = S_val[np.isfinite(S_val)]
     k = min(max(int(B * nvd), 1), len(cal))
     q0 = float(np.sort(cal)[-k])
+    n_flood = 0
     if policy in ("hindsight", "prevday", "daytopB"):
         open_t, score, case_att = fixed_threshold_cases(cand, policy, q0, B)
     else:
         eta = 0.0 if policy == "static" else review_step(cal, B)
+        cap = "auto" if policy == "caliber" else None      # static: as deployed today, no cap
         case_of, cases = replay_tiers(S, st["t1"], st["w"], st["y"], keys, B, q0, eta, 2.0, 0.0,
-                                      0.0, np.inf, np.random.default_rng(0))
+                                      0.0, np.inf, np.random.default_rng(0), flood_cap=cap,
+                                      refund_delay_ns=verdict_delay_ns)
+        n_flood = sum(bool(c.get("flood")) for c in cases)
         open_t, score, case_att = cases_of(case_of, cases, S, st["t1"], st["node"], st["y"], attacks)
     days = day_of(open_t[np.isfinite(open_t)], tz) if len(open_t) else np.array([])
     # days with data (a few spill-over units across midnight do not make a monitored day)
@@ -185,7 +191,11 @@ def one_deployment(S, S_val, st, keys, B, nvd, policy, attacks, tz, cand=None):
     for c in np.flatnonzero(np.isfinite(reviewed)):
         for a in case_att[c]:
             ttr[a] = min(ttr.get(a, np.inf), (reviewed[c] - attacks[a]["start_ns"]) / HOUR)
+    # attack cases never reviewed (expired in the queue): the replay refunded them at the verdict
+    # delay, which overstates the refunds an analyst could have given; should stay ~0
+    unrev = sum(1 for c in range(len(case_att)) if case_att[c] and not np.isfinite(reviewed[c]))
     return {"load_ratio": float(per_day.mean() / B), "worst_day_ratio": float(per_day.max() / B),
+            "flood_cases": int(n_flood), "unreviewed_attack_cases": int(unrev),
             "attacks": len(present), "attacks_seen": sum(a in ttr for a in present),
             "time_to_review_h": {str(a): float(ttr[a]) for a in present if a in ttr}}
 
@@ -197,7 +207,7 @@ def main():
     ap.add_argument("--dataset", required=True)
     ap.add_argument("--group", default="da39a3ee5e")
     ap.add_argument("--subsets", type=int, default=5, help="random ensembles per size")
-    ap.add_argument("--policies", default="static,prevday,daytopB,hindsight,caliber")
+    ap.add_argument("--policies", default="static,prevday,daytopB,hindsight,caliber,caliber_nocap")
     ap.add_argument("--detector", default="model", choices=["model", "allowlist"],
                     help="allowlist: executable-novelty baseline on the same units (Guerra et al.)")
     args = ap.parse_args()
@@ -208,9 +218,8 @@ def main():
     labels = _with_borrower(labels, members[0], args.artifact_dir)
     st = ensemble_stream(members, labels, cache_dir=cache)
     tz = labels.get("timezone", "US/Eastern")
-    parents = load_parents(args.artifact_dir, args.dataset)
-    keys = (lineage_keys(st["node"], st["partner"], parents, process_predicate(parents, meta), 1)
-            if parents is not None else st["node"].astype(np.int64))
+    keys, has_lin = case_keys(st, args.artifact_dir, args.dataset, meta)
+    print(f"cases by {'lineage' if has_lin else 'entity'}", flush=True)
     nvd = max(len(members[0].get("val_dates", [])), 1)
     Z, Zv, M = st["Z"], st["Z_val"], st["Z"].shape[0]
     if args.detector == "allowlist":

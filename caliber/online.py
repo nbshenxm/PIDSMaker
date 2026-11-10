@@ -26,6 +26,7 @@ Usage:
 import argparse
 import json
 import os
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -34,6 +35,12 @@ from caliber import conformal, data
 from caliber.pilot import normaliser, unit_labels, unit_table
 
 ALPHAS = [1e-3, 1e-2]
+
+
+def _nanmean0(X):
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)   # all-NaN columns stay NaN
+        return np.nanmean(X, 0)
 
 
 def ensemble_stream(members, labels, window="batch", epoch_rule="min_val_loss", cache_dir=None):
@@ -54,7 +61,7 @@ def ensemble_stream(members, labels, window="batch", epoch_rule="min_val_loss", 
     y = unit_labels(tt, "entity_window", labels)
     return {
         "S_val": np.nanmean(np.vstack(zs_val), 0),
-        "S": np.vstack(zs_test).mean(0),
+        "S": _nanmean0(np.vstack(zs_test)),           # a unit missing from a member still scores
         "t1": tt["t1"].values, "w": idx_test.get_level_values("w").values, "y": y,
         "node": idx_test.get_level_values("node").values,
         "Z": np.vstack(zs_test),                   # per-member scores (for vote splits)
