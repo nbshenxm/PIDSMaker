@@ -188,18 +188,34 @@ def evaluate(st, case_of, cases, B, tz, attacks=None):
         "attack_entities_reviewed": len(rev_ent - auto_ent),
         "attack_entities_handled": len(auto_ent | rev_ent),
         "attack_entities": len(set(node[y])),
-        **_attack_level(attacks, set(node[y]), auto_ent | rev_ent, auto_ent),
+        **_attack_level(attacks, node, t, np.flatnonzero(y),
+                        [i for i in att_units if tierA[case_of[i]] or case_of[i] in reviewed],
+                        [i for i in att_units if tierA[case_of[i]]]),
     }
 
 
-def _attack_level(attacks, present, handled, automated):
+def unit_attacks(node, t, idx, attacks, slack_ns=HOUR):
+    """For malicious units idx: the attacks each one belongs to. A unit belongs to attack k when
+    its entity is in k's ground truth AND its time lies in k's interval (window end t within
+    [start, end + slack]). Entities shared by several attacks (e.g. a browser used in two THEIA
+    attacks) are credited only to the attack running at the time."""
+    sets = [set(a["nids"]) for a in attacks]
+    out = {}
+    for i in idx:
+        out[i] = [k for k, a in enumerate(attacks)
+                  if node[i] in sets[k] and a["start_ns"] <= t[i] <= a["end_ns"] + slack_ns]
+    return out
+
+
+def _attack_level(attacks, node, t, mal_units, handled_units, automated_units):
     if not attacks:
         return {}
-    in_test = [set(a["nids"]) & present for a in attacks]
-    in_test = [a for a in in_test if a]
-    return {"attacks": len(in_test),
-            "attacks_handled": sum(bool(a & handled) for a in in_test),
-            "attacks_automated": sum(bool(a & automated) for a in in_test)}
+    ua = unit_attacks(node, t, mal_units, attacks)
+    present = {k for i in mal_units for k in ua[i]}
+    handled = {k for i in handled_units for k in ua.get(i, [])}
+    automated = {k for i in automated_units for k in ua.get(i, [])}
+    return {"attacks": len(present), "attacks_handled": len(handled & present),
+            "attacks_automated": len(automated & present)}
 
 
 def _with_borrower(labels, manifest, artifact_dir):

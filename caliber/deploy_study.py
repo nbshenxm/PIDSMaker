@@ -28,7 +28,7 @@ from caliber import data
 from caliber.budget import DAY, HOUR
 from caliber.lineage import case_keys
 from caliber.online import day_of, ensemble_stream
-from caliber.tiers import _with_borrower, replay_tiers, review_step
+from caliber.tiers import _with_borrower, replay_tiers, review_step, unit_attacks
 
 BUDGETS = [20, 50, 100, 200, 500]
 MAX_WAIT_DAYS = 3
@@ -42,12 +42,9 @@ def cases_of(case_of, cases, S, t, node, y, attacks):
     idx = np.flatnonzero(case_of >= 0)
     np.minimum.at(open_t, case_of[idx], t[idx])
     np.maximum.at(score, case_of[idx], S[idx])
-    att_nodes = [set(a["nids"]) for a in attacks]
     case_att = [set() for _ in range(n)]
-    for i in idx[y[idx]]:
-        for k, ns in enumerate(att_nodes):
-            if node[i] in ns:
-                case_att[case_of[i]].add(k)
+    for i, ks in unit_attacks(node, t, idx[y[idx]], attacks).items():
+        case_att[case_of[i]].update(ks)
     return open_t, score, case_att
 
 
@@ -89,12 +86,9 @@ def candidate_cases(S, st, keys, attacks, tz):
     open_t = np.full(n, np.inf)
     np.maximum.at(score, inv, S)
     np.minimum.at(open_t, inv, st["t1"])
-    att_nodes = [set(a["nids"]) for a in attacks]
     case_att = [set() for _ in range(n)]
-    for i in np.flatnonzero(st["y"]):
-        for k, ns in enumerate(att_nodes):
-            if st["node"][i] in ns:
-                case_att[inv[i]].add(k)
+    for i, ks in unit_attacks(st["node"], st["t1"], np.flatnonzero(st["y"]), attacks).items():
+        case_att[inv[i]].update(ks)
     return score, open_t, case_att, day_of(open_t, tz)
 
 
