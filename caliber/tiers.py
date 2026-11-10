@@ -148,6 +148,7 @@ def main():
     ap.add_argument("--budget", type=float, default=50)
     ap.add_argument("--kappa", type=float, default=1.645,
                     help="confidence-interval half-width in ensemble standard errors")
+    ap.add_argument("--rules", default="ensemble,ensemble_upper,ensemble_ci,single_run")
     args = ap.parse_args()
     cache = os.path.join(args.artifact_dir, "caliber", "cache")
     members = data.group_manifests(data.load_manifests(
@@ -165,13 +166,16 @@ def main():
     M = st["Z"].shape[0]
     sem = np.nan_to_num(np.nanstd(st["Z"], 0) / np.sqrt(M))
     sem_val = np.nan_to_num(np.nanstd(st["Z_val"], 0) / np.sqrt(M))
-    for score_name in ["ensemble", "ensemble_ci", "single_run"]:
+    for score_name in args.rules.split(","):
         S_act = cal_act = None
         if score_name == "single_run":
             S, cal = st["Z"][0], st["Z_val"][0]
         elif score_name == "ensemble":
             S, cal = st["S"], st["S_val"]
-        else:   # confidence-interval rule: review on the upper bound, act on the lower bound
+        elif score_name == "ensemble_upper":   # review on the upper bound, act on the mean
+            S, cal = st["S"] + args.kappa * sem, st["S_val"] + args.kappa * sem_val
+            S_act, cal_act = st["S"], st["S_val"]
+        else:   # ensemble_ci: review on the upper bound, act on the lower bound
             S, cal = st["S"] + args.kappa * sem, st["S_val"] + args.kappa * sem_val
             S_act, cal_act = st["S"] - args.kappa * sem, st["S_val"] - args.kappa * sem_val
         cal = cal[np.isfinite(cal)]
