@@ -125,7 +125,15 @@ def evaluate(st, case_of, cases, B, tz):
     for d, cs in by_day.items():
         reviewed |= set(sorted(cs, key=lambda c: first_t[c])[: int(B)])
     rev_ent = {node[i] for i in att_units if case_of[i] in reviewed}
+    # per day (convergence of both controllers): benign review cases, false automations
+    per_day = {}
+    for c, tc in first_t.items():
+        d = str(day_of(np.array([tc]), tz)[0])
+        row = per_day.setdefault(d, [0, 0])
+        if not ylab[c]:
+            row[0 if not tierA[c] else 1] += 1
     return {
+        "per_day_benign_review_and_false_auto": dict(sorted(per_day.items())),
         "cases_A_per_day": nA / nd, "cases_B_per_day": nB / nd, "audits_per_day": float(aud.sum()) / nd,
         "analyst_load_per_day": (nB + float(aud.sum())) / nd,
         "all_to_triage_load_per_day": (nA + nB) / nd,
