@@ -124,8 +124,18 @@ class TGNMemory(torch.nn.Module):
         self.msg_s_store = {j: (i, i, i, msg) for j in range(self.num_nodes)}
         self.msg_d_store = {j: (i, i, i, msg) for j in range(self.num_nodes)}
 
+    # CALIBER: flushing the whole memory (n_id = all nodes, on the switch to eval mode) needs
+    # ~100 GB of message tensors on TRACE_E3. Updates are computed chunk by chunk from the
+    # unchanged memory and written afterwards, which is exactly equivalent to one call.
+    _MEMORY_CHUNK = 1_000_000
+
     def _update_memory(self, n_id: Tensor):
-        memory, last_update = self._get_updated_memory(n_id)
+        if n_id.numel() <= self._MEMORY_CHUNK:
+            memory, last_update = self._get_updated_memory(n_id)
+        else:
+            parts = [self._get_updated_memory(c) for c in n_id.split(self._MEMORY_CHUNK)]
+            memory = torch.cat([p[0] for p in parts])
+            last_update = torch.cat([p[1] for p in parts])
         self.memory[n_id] = memory
         self.last_update[n_id] = last_update
 
