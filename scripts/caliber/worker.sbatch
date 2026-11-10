@@ -49,15 +49,17 @@ LOCAL_SCRATCH="${TMPDIR:-/tmp}/caliber_edges_${JOB}"
 GPFS_SCRATCH="/fs1/projects/benchmarking_PIDS/sherwin_dir/caliber_scratch/${JOB}"
 LOCAL_MIN_GB="${LOCAL_MIN_GB:-150}"   # node /tmp is shared with other users: use it only when roomy
 trap 'rm -rf "${LOCAL_SCRATCH}" "${GPFS_SCRATCH}"' EXIT TERM INT
-# Do not start a task when the fileset is close to its file-count quota.
+# Do not start a task when the fileset is close to its file-count or block quota.
 MAX_FILES_FRAC="${MAX_FILES_FRAC:-0.85}"
+MAX_BLOCKS_FRAC="${MAX_BLOCKS_FRAC:-0.90}"
 quota_ok() {
     local line
     line=$(/usr/lpp/mmfs/bin/mmlsquota -j benchmarking_PIDS fs1 2>/dev/null | awk '$2=="FILESET"')
     [[ -z "${line}" ]] && return 0
-    # fields after "|": files quota limit ...
-    awk -v f="${MAX_FILES_FRAC}" '{ for (i = 1; i <= NF; i++) if ($i == "|") break;
-                                    exit !($(i+1) < f * $(i+2)) }' <<< "${line}"
+    # fields: fs FILESET blocks quota limit ... | files quota limit ...  (blocks in KB)
+    awk -v f="${MAX_FILES_FRAC}" -v b="${MAX_BLOCKS_FRAC}" '{
+        for (i = 1; i <= NF; i++) if ($i == "|") break;
+        exit !(($(i+1) < f * $(i+2)) && ($3 < b * $4)) }' <<< "${line}"
 }
 python -c "import torch; print('worker', '${JOB}', 'on', '$(hostname)', 'cuda:', torch.cuda.is_available())"
 
