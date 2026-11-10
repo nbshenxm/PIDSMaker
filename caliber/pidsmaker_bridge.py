@@ -110,7 +110,7 @@ def cmd_manifest(argv):
     if os.environ.get("CALIBER_PACK") == "1":
         # Collapse per-batch CSVs into one Parquet per (split, epoch): file-count quota.
         from caliber.pack import pack_task
-        pack_task(cfg.training._task_path, src_edge_dir=edge_dir)
+        pack_task(cfg.training._task_path, src_edge_dir=edge_dir, tz=str(cfg.dataset.timezone))
     elif edge_dir != final_dir:
         raise RuntimeError("edge losses are on node-local scratch; set CALIBER_PACK=1 to keep them")
 

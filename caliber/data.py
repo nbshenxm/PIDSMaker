@@ -97,7 +97,7 @@ def read_split(edge_losses_dir, split, epoch, cache_dir=None):
     """All edges of one split/epoch as a DataFrame; column `b` = batch index (file order)."""
     packed = os.path.join(edge_losses_dir, split, f"model_epoch_{epoch}.parquet")
     if os.path.exists(packed):
-        df = pd.read_parquet(packed)
+        df = _as_edges(pd.read_parquet(packed))
         df["loss"] = df["loss"].astype(np.float32)
         df["b"] = df["b"].astype(np.int32)
         return df
@@ -120,6 +120,22 @@ def read_split(edge_losses_dir, split, epoch, cache_dir=None):
         os.makedirs(cache_dir, exist_ok=True)
         df.to_parquet(cp, index=False)
     return df
+
+
+def _as_edges(df):
+    """Node-level detectors (Flash, MAGIC, NodLink, R-CAID, ThreaTrace, OCR-APT) score nodes,
+    not edges. Represent each node score as a self-loop so that every downstream step
+    (unit = entity x window, lineage keys, controllers) applies unchanged. MAGIC detects with
+    its kNN distance score, which replaces the reconstruction loss when present."""
+    if "srcnode" in df.columns:
+        return df
+    if "node" not in df.columns or "time" not in df.columns:
+        raise ValueError("node-level losses without node ids or window times "
+                         "(packed before 2026-11-10; rerun the member)")
+    score = df["magic_score"] if "magic_score" in df.columns else df["loss"]
+    return pd.DataFrame({"loss": score.values, "srcnode": df["node"].values,
+                         "dstnode": df["node"].values, "time": df["time"].values,
+                         "edge_type": -1, "b": df["b"].values})
 
 
 def mean_loss(edge_losses_dir, split, epoch, cache_dir=None):

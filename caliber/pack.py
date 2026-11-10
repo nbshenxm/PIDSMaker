@@ -26,15 +26,25 @@ import pyarrow.parquet as pq
 EDGE_COLS = ["loss", "srcnode", "dstnode", "time", "edge_type"]
 
 
-def pack_epoch_dir(d, out=None):
-    """Pack CSV directory d into Parquet file out (default: d + '.parquet'), then remove d."""
+def _window_end_ns(fn, tz):
+    """End of the batch window from a PIDSMaker file name '<start>~<end>.csv' (local time)."""
+    end = fn[:-4].split("~")[1]
+    ts = pd.Timestamp(end[:19]).tz_localize(tz, ambiguous=False, nonexistent="shift_forward")
+    return int(ts.value) + int(end[20:29] or 0)
+
+
+def pack_epoch_dir(d, out=None, tz="US/Eastern"):
+    """Pack CSV directory d into Parquet file out (default: d + '.parquet'), then remove d.
+    All columns are kept. Node-level detectors write (node, loss[, magic_score]) without a
+    timestamp; they get `time` = end of the batch window, parsed from the file name."""
     files = sorted(f for f in os.listdir(d) if f.endswith(".csv"))
     if not files:
         return 0
     dfs = []
     for b, fn in enumerate(files):
         df = pd.read_csv(os.path.join(d, fn))
-        df = df[[c for c in EDGE_COLS if c in df.columns]]
+        if "node" in df.columns and "srcnode" not in df.columns:
+            df["time"] = _window_end_ns(fn, tz)
         df["b"] = b
         dfs.append(df)
     df = pd.concat(dfs, ignore_index=True)
@@ -54,9 +64,10 @@ def pack_epoch_dir(d, out=None):
     return len(files)
 
 
-def pack_task(task_path, log=print, src_edge_dir=None):
+def pack_task(task_path, log=print, src_edge_dir=None, tz="US/Eastern"):
     """src_edge_dir: where the CSVs are (node-local scratch, see CALIBER_EDGE_SCRATCH).
-    Parquet files always go to <task_path>/edge_losses/<split>/model_epoch_<k>.parquet."""
+    Parquet files always go to <task_path>/edge_losses/<split>/model_epoch_<k>.parquet.
+    tz: the dataset's timezone (PIDSMaker names batch files in local time)."""
     src = src_edge_dir or os.path.join(task_path, "edge_losses")
     dst = os.path.join(task_path, "edge_losses")
     removed = 0
@@ -64,7 +75,7 @@ def pack_task(task_path, log=print, src_edge_dir=None):
         for d in sorted(glob.glob(os.path.join(src, split, "model_epoch_*"))):
             if os.path.isdir(d):
                 out = os.path.join(dst, split, os.path.basename(d.rstrip("/")) + ".parquet")
-                removed += pack_epoch_dir(d, out)
+                removed += pack_epoch_dir(d, out, tz)
     log(f"packed {task_path}: {removed} CSV files -> parquet")
     return removed
 
