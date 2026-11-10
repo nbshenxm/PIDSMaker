@@ -42,6 +42,7 @@ export CUBLAS_WORKSPACE_CONFIG=:4096:8
 export PYTHONHASHSEED=0
 export NLTK_DATA="${NLTK_DATA:-${HOME}/nltk_data}"
 export CALIBER_PACK=1   # pack edge-loss CSVs after each member (file-count quota)
+export CALIBER_SKIP_EDGE_SCORES=1   # do not write per-epoch edge-score pickles (block quota)
 # Per-batch edge-loss CSVs (up to ~130k files and ~8 GB per THEIA_E5 member) are written to
 # node-local disk and only the packed Parquet reaches the fileset (1.024M file quota).
 LOCAL_SCRATCH="${TMPDIR:-/tmp}/caliber_edges_${JOB}"

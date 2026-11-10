@@ -92,7 +92,8 @@ def main(val_tw_path, test_tw_path, model_epoch_dir, cfg, tw_to_malicious_nodes,
     os.makedirs(out_dir, exist_ok=True)
 
     # Save edge-level scores (consistent with node_evaluation)
-    if edge_records is not None:
+    # CALIBER: skipped under the worker (CALIBER_SKIP_EDGE_SCORES=1); duplicates the edge losses, ~0.4 GB per epoch
+    if edge_records is not None and os.environ.get("CALIBER_SKIP_EDGE_SCORES") != "1":
         edge_scores_file = os.path.join(out_dir, f"edge_scores_{model_epoch_dir}.pkl")
         torch.save(edge_records, edge_scores_file)
         log(f"Saved {len(edge_records)} edge scores to {edge_scores_file}")
