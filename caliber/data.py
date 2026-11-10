@@ -122,17 +122,32 @@ def read_split(edge_losses_dir, split, epoch, cache_dir=None):
     return df
 
 
+def _looks_like_magic_val(df):
+    """Old MAGIC validation files: no detection score, and a loss that is identically zero."""
+    return len(df) > 0 and float(np.abs(df["loss"]).max()) == 0.0
+
+
 def _as_edges(df):
     """Node-level detectors (Flash, MAGIC, NodLink, R-CAID, ThreaTrace, OCR-APT) score nodes,
     not edges. Represent each node score as a self-loop so that every downstream step
     (unit = entity x window, lineage keys, controllers) applies unchanged. MAGIC detects with
-    its kNN distance score, which replaces the reconstruction loss when present."""
+    each detector's own anomaly score, as PIDSMaker evaluates it: MAGIC's kNN distance score,
+    Flash's and ThreaTrace's classification-confidence scores (counted only where PIDSMaker
+    counts them, i.e. correct_pred == 1); the others score by loss."""
     if "srcnode" in df.columns:
         return df
     if "node" not in df.columns or "time" not in df.columns:
         raise ValueError("node-level losses without node ids or window times "
                          "(packed before 2026-11-10; rerun the member)")
-    score = df["magic_score"] if "magic_score" in df.columns else df["loss"]
+    native = [c for c in ("magic_score", "flash_score", "threatrace_score") if c in df.columns]
+    if native:
+        score = df[native[0]].astype(np.float64)
+        if "correct_pred" in df.columns:
+            score = score.where(df["correct_pred"].astype(bool), 0.0)
+    elif "magic_score" not in df.columns and _looks_like_magic_val(df):
+        raise ValueError("MAGIC validation losses without magic_score (rerun the member)")
+    else:
+        score = df["loss"]
     return pd.DataFrame({"loss": score.values, "srcnode": df["node"].values,
                          "dstnode": df["node"].values, "time": df["time"].values,
                          "edge_type": -1, "b": df["b"].values})

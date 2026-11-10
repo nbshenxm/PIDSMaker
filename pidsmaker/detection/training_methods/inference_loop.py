@@ -193,9 +193,18 @@ def test_node_level(
             with open(train_distance_file, "a") as f:
                 f.write(f"{mean_distance_train}\n")
 
+            # CALIBER: also score validation nodes exactly as test nodes are scored (kNN distance
+            # to a standardized sample of the same window, relative to the benign mean distance),
+            # so that thresholds can be calibrated on benign validation scores.
+            val_dist, _ = nbrs.kneighbors(
+                (x_train - x_train_mean) / x_train_std, n_neighbors=n_neighbors
+            )
+            val_score = val_dist.mean(axis=1) / mean_distance_train
+
             for i, node in enumerate(n_id):
                 temp_dic = {
                     "node": node.item(),
+                    "magic_score": float(val_score[i]),
                     "loss": float(loss[i].item()),
                 }
                 node_list.append(temp_dic)
