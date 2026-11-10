@@ -14,7 +14,7 @@ set -uo pipefail
 QUEUE="${QUEUE:-/fs1/projects/benchmarking_PIDS/sherwin_dir/caliber_queue}"
 INTERVAL_MIN="${INTERVAL_MIN:-30}"
 MAX_RETRY="${MAX_RETRY:-3}"
-TRANSIENT='OperationalError|could not connect to server|server closed the connection|Connection refused|Disk quota exceeded'
+TRANSIENT='No space left on device|OperationalError|could not connect to server|server closed the connection|Connection refused|Disk quota exceeded'
 mkdir -p "${QUEUE}/retries"
 
 while true; do

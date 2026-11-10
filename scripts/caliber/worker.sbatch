@@ -5,7 +5,7 @@
 #SBATCH --qos=long
 #SBATCH --time=2-00:00:00
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=96G
+#SBATCH --mem=160G
 #SBATCH --gres=gpu:1
 #
 # GPU worker: repeatedly claims a task from the CALIBER queue and runs it.
@@ -26,7 +26,7 @@ ARTIFACT_DIR="${ARTIFACT_DIR:-/fs1/projects/benchmarking_PIDS/sherwin_dir/artifa
 DB_INFO="${DB_INFO:-/fs1/projects/benchmarking_PIDS/sherwin_dir/db_server.info}"
 CONDA_ENV="${CONDA_ENV:-pids3}"
 IDLE_EXIT_MIN="${IDLE_EXIT_MIN:-20}"
-MIN_REMAINING_MIN="${MIN_REMAINING_MIN:-240}"
+MIN_REMAINING_MIN="${MIN_REMAINING_MIN:-720}"
 JOB="${SLURM_JOB_ID:-local$$}"
 
 cd "${REPO_DIR}"
@@ -44,8 +44,10 @@ export NLTK_DATA="${NLTK_DATA:-${HOME}/nltk_data}"
 export CALIBER_PACK=1   # pack edge-loss CSVs after each member (file-count quota)
 # Per-batch edge-loss CSVs (up to ~130k files and ~8 GB per THEIA_E5 member) are written to
 # node-local disk and only the packed Parquet reaches the fileset (1.024M file quota).
-export CALIBER_EDGE_SCRATCH="${TMPDIR:-/tmp}/caliber_edges_${JOB}"
-trap 'rm -rf "${CALIBER_EDGE_SCRATCH}"' EXIT
+LOCAL_SCRATCH="${TMPDIR:-/tmp}/caliber_edges_${JOB}"
+GPFS_SCRATCH="/fs1/projects/benchmarking_PIDS/sherwin_dir/caliber_scratch/${JOB}"
+LOCAL_MIN_GB="${LOCAL_MIN_GB:-150}"   # node /tmp is shared with other users: use it only when roomy
+trap 'rm -rf "${LOCAL_SCRATCH}" "${GPFS_SCRATCH}"' EXIT TERM INT
 # Do not start a task when the fileset is close to its file-count quota.
 MAX_FILES_FRAC="${MAX_FILES_FRAC:-0.85}"
 quota_ok() {
@@ -103,7 +105,10 @@ while true; do
     ARGS=$(grep -m1 '^ARGS=' "${task}" | cut -d= -f2-)
     read -r DB_HOST DB_PORT _ < "${DB_INFO}"
     log="${QUEUE}/logs/${name}.log"
-    echo "[$(date)] START ${name} (log ${log})"
+    free_gb=$(df --output=avail -BG "${TMPDIR:-/tmp}" | tail -1 | tr -dc 0-9)
+    if (( ${free_gb:-0} >= LOCAL_MIN_GB )); then export CALIBER_EDGE_SCRATCH="${LOCAL_SCRATCH}"
+    else export CALIBER_EDGE_SCRATCH="${GPFS_SCRATCH}"; fi
+    echo "[$(date)] START ${name} (log ${log}; scratch ${CALIBER_EDGE_SCRATCH}, node /tmp free ${free_gb}G)"
 
     # shellcheck disable=SC2086
     if python pidsmaker/main.py "${SYSTEM}" "${DATASET}" \
