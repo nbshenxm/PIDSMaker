@@ -199,6 +199,8 @@ def main():
     ap.add_argument("--rules", default="ensemble,ensemble_upper,ensemble_ci,single_run")
     ap.add_argument("--quick", action="store_true",
                     help="only all-to-triage and B_auto=0.25 (eta_act=1.0)")
+    ap.add_argument("--single_all", action="store_true",
+                    help="single-run rules for every member (mean and range), not only member 0")
     args = ap.parse_args()
     cache = os.path.join(args.artifact_dir, "caliber", "cache")
     members = data.group_manifests(data.load_manifests(
@@ -217,12 +219,16 @@ def main():
     M = st["Z"].shape[0]
     sem = np.nan_to_num(np.nanstd(st["Z"], 0) / np.sqrt(M))
     sem_val = np.nan_to_num(np.nanstd(st["Z_val"], 0) / np.sqrt(M))
-    for score_name in args.rules.split(","):
+    rules = []
+    for r_ in args.rules.split(","):    # single-run rules: every member, reported as mean/range
+        rules += [f"{r_}#{m}" for m in range(M)] if r_.startswith("single_run") and args.single_all else [r_]
+    for score_name in rules:
         S_act = cal_act = None
-        static = score_name.endswith("_static")    # fixed validation threshold, no controller
-        base = score_name[:-len("_static")] if static else score_name
+        name, _, idx = score_name.partition("#")
+        static = name.endswith("_static")    # fixed validation threshold, no controller
+        base = name[:-len("_static")] if static else name
         if base == "single_run":
-            S, cal = st["Z"][0], st["Z_val"][0]
+            S, cal = st["Z"][int(idx or 0)], st["Z_val"][int(idx or 0)]
         elif base == "ensemble":
             S, cal = st["S"], st["S_val"]
         elif base == "ensemble_upper":   # review on the upper bound, act on the mean
@@ -262,6 +268,8 @@ def main():
                 tag = f"{score_name} " + ("all-to-triage" if b_auto is None
                                           else f"B_auto={b_auto} eta_act={eta_a}")
                 out[tag] = r
+                if "#" in score_name:
+                    continue                      # summarized over members below
                 print(f"  {tag:34s} false-auto/day={r.get('false_automations_per_day', 0):5.2f} analyst/day={r['analyst_load_per_day']:6.1f} "
                       f"(all-to-triage {r['all_to_triage_load_per_day']:6.1f}) auto share={r['automation_share']:.2f} "
                       f"prec A={r['precision_A']:.2f} B={r['precision_B']:.3f} | attack entities "
@@ -269,6 +277,24 @@ def main():
                       f"handled={r['attack_entities_handled']}/{r['attack_entities']} | attacks "
                       f"{r.get('attacks_handled', '-')}/{r.get('attacks', '-')} "
                       f"(auto {r.get('attacks_automated', '-')})", flush=True)
+    # single-run rules over all members: mean [min-max]
+    groups = {}
+    for tag, r in out.items():
+        name, sep, rest = tag.partition("#")
+        if sep:
+            groups.setdefault(name + " " + rest.split(" ", 1)[1], []).append(r)
+    keys = ["analyst_load_per_day", "false_automations_per_day", "attack_entities_handled",
+            "attacks_handled", "attacks_automated"]
+    for tag, rs in groups.items():
+        summ = {k: [float(r.get(k, np.nan)) for r in rs] for k in keys}
+        out[tag + " (members)"] = {k: {"mean": float(np.nanmean(v)), "min": float(np.nanmin(v)),
+                                       "max": float(np.nanmax(v))} for k, v in summ.items()}
+        fmt = lambda k: f"{np.nanmean(summ[k]):.1f} [{np.nanmin(summ[k]):.0f}-{np.nanmax(summ[k]):.0f}]"
+        print(f"  {tag:34s} (mean [min-max] over {len(rs)} members) analyst/day={fmt('analyst_load_per_day')} "
+              f"false-auto/day={np.nanmean(summ['false_automations_per_day']):.2f} | attack entities "
+              f"handled={fmt('attack_entities_handled')}/{rs[0]['attack_entities']} | attacks "
+              f"{fmt('attacks_handled')}/{rs[0].get('attacks', '-')} (auto {fmt('attacks_automated')})",
+              flush=True)
     rep = os.path.join(args.artifact_dir, "caliber", "reports")
     with open(os.path.join(rep, f"tiers_{args.system}_{args.dataset}_{args.group}_B{int(B)}.json"),
               "w", encoding="utf-8") as fh:

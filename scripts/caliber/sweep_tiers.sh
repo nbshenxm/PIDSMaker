@@ -16,6 +16,6 @@ while read -r n key; do
     [[ "$dataset" =~ $DS_REGEX ]] || continue
     for B in $BUDGETS; do
         python -m caliber.tiers --artifact_dir "$A" --system "$system" --dataset "$dataset" \
-            --budget "$B" --rules "$RULES" --quick 2>&1 | grep -v "Warn\|read_csv\|nltk"
+            --budget "$B" --rules "$RULES" --quick --single_all 2>&1 | grep -v "Warn\|read_csv\|nltk"
     done
 done

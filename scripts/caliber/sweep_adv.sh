@@ -17,7 +17,7 @@ for pair in "velox CADETS_E3" "velox THEIA_E3" "orthrus CADETS_E3" "orthrus THEI
         for B in $BUDGETS; do
             echo "#### $1 $2 group=$g attack=$spec B=$B"
             python -m caliber.tiers --artifact_dir "$A" --system "$1" --dataset "$2" --group "$g" \
-                --budget "$B" --rules "$RULES" --quick 2>&1 | grep -v "Warn\|read_csv\|nltk"
+                --budget "$B" --rules "$RULES" --quick --single_all 2>&1 | grep -v "Warn\|read_csv\|nltk"
         done
     done
 done
