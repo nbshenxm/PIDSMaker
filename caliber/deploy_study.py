@@ -78,15 +78,59 @@ def analyst_queue(open_t, score, B, t_end):
     return reviewed
 
 
-def one_deployment(S, S_val, st, keys, B, nvd, policy, attacks, tz):
+def candidate_cases(S, st, keys, attacks, tz):
+    """All (lineage, hour) cases with their best score: under any threshold that is fixed for a
+    day, a case alerts exactly when its best unit reaches the threshold."""
+    hour = (st["t1"] // HOUR).astype(np.int64)
+    _, inv = np.unique(np.stack([keys.astype(np.int64), hour]), axis=1, return_inverse=True)
+    inv = inv.ravel()
+    n = inv.max() + 1
+    score = np.full(n, -np.inf)
+    open_t = np.full(n, np.inf)
+    np.maximum.at(score, inv, S)
+    np.minimum.at(open_t, inv, st["t1"])
+    att_nodes = [set(a["nids"]) for a in attacks]
+    case_att = [set() for _ in range(n)]
+    for i in np.flatnonzero(st["y"]):
+        for k, ns in enumerate(att_nodes):
+            if st["node"][i] in ns:
+                case_att[inv[i]].add(k)
+    return score, open_t, case_att, day_of(open_t, tz)
+
+
+def fixed_threshold_cases(cand, policy, q0, B):
+    """Cases alerted by a threshold that changes at most once per day."""
+    score, open_t, case_att, days = cand
+    if policy == "static":
+        q_of_day = {d: q0 for d in np.unique(days)}
+    elif policy == "hindsight":                     # label-free, but uses the whole test period
+        nd = len(np.unique(days))
+        k = min(max(int(B * nd), 1), len(score))
+        q_of_day = {d: float(np.sort(score)[-k]) for d in np.unique(days)}
+    elif policy == "prevday":                       # yesterday's B-th best case score
+        q_of_day, prev = {}, q0
+        for d in sorted(np.unique(days)):
+            q_of_day[d] = prev
+            s = np.sort(score[days == d])
+            prev = float(s[-min(int(B), len(s))]) if len(s) else prev
+    else:
+        raise ValueError(policy)
+    keep = score >= np.array([q_of_day[d] for d in days])
+    return open_t[keep], score[keep], [case_att[i] for i in np.flatnonzero(keep)]
+
+
+def one_deployment(S, S_val, st, keys, B, nvd, policy, attacks, tz, cand=None):
     cal = S_val[np.isfinite(S_val)]
     k = min(max(int(B * nvd), 1), len(cal))
     q0 = float(np.sort(cal)[-k])
-    eta = 0.0 if policy == "static" else 0.02 * (float(np.std(cal)) or 1.0)
-    case_of, cases = replay_tiers(S, st["t1"], st["w"], st["y"], keys, B, q0, eta, 2.0, 0.0,
-                                  0.0, np.inf, np.random.default_rng(0))
-    open_t, score, case_att = cases_of(case_of, cases, S, st["t1"], st["node"], st["y"], attacks)
-    days = day_of(open_t[np.isfinite(open_t)], tz) if len(cases) else np.array([])
+    if policy in ("hindsight", "prevday"):
+        open_t, score, case_att = fixed_threshold_cases(cand, policy, q0, B)
+    else:
+        eta = 0.0 if policy == "static" else 0.02 * (float(np.std(cal)) or 1.0)
+        case_of, cases = replay_tiers(S, st["t1"], st["w"], st["y"], keys, B, q0, eta, 2.0, 0.0,
+                                      0.0, np.inf, np.random.default_rng(0))
+        open_t, score, case_att = cases_of(case_of, cases, S, st["t1"], st["node"], st["y"], attacks)
+    days = day_of(open_t[np.isfinite(open_t)], tz) if len(open_t) else np.array([])
     test_days = np.unique(day_of(st["t1"], tz))
     per_day = np.array([np.sum(days == d) for d in test_days], float)
     reviewed = analyst_queue(open_t, score, B, float(st["t1"].max()))
@@ -107,6 +151,7 @@ def main():
     ap.add_argument("--dataset", required=True)
     ap.add_argument("--group", default="da39a3ee5e")
     ap.add_argument("--subsets", type=int, default=5, help="random ensembles per size")
+    ap.add_argument("--policies", default="static,prevday,hindsight,caliber")
     args = ap.parse_args()
     cache = os.path.join(args.artifact_dir, "caliber", "cache")
     members = data.group_manifests(data.load_manifests(
@@ -129,14 +174,19 @@ def main():
         configs += [(f"ensemble{size}", sorted(rng.choice(M, size, replace=False).tolist()))
                     for _ in range(draws)]
     rows = []
+    cand_cache = {}
     for B in BUDGETS:
         for kind, subset in configs:
             S = np.nanmean(Z[subset], 0)
             S_val = np.nanmean(Zv[subset], 0)
-            for policy in ["static", "caliber"]:
-                r = one_deployment(S, S_val, st, keys, B, nvd, policy, labels["attacks"], tz)
+            key = tuple(subset)
+            if key not in cand_cache:
+                cand_cache[key] = candidate_cases(S, st, keys, labels["attacks"], tz)
+            for policy in args.policies.split(","):
+                r = one_deployment(S, S_val, st, keys, B, nvd, policy, labels["attacks"], tz,
+                                   cand_cache[key])
                 rows.append({"B": B, "runs": kind, "members": subset, "policy": policy, **r})
-        print(f"B={B} done ({len(configs) * 2} deployments)", flush=True)
+        print(f"B={B} done", flush=True)
     rep = os.path.join(args.artifact_dir, "caliber", "reports")
     out = os.path.join(rep, f"deploy_{args.system}_{args.dataset}_{args.group}.json")
     with open(out, "w", encoding="utf-8") as fh:
