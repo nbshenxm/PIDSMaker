@@ -7,6 +7,7 @@ S=/fs1/projects/benchmarking_PIDS/sherwin_dir
 A=$S/artifacts_v3/
 MIN_MEMBERS="${MIN_MEMBERS:-5}"
 DS_REGEX="${DS_REGEX:-.}"
+SYS_REGEX="${SYS_REGEX:-.}"
 RULES="${RULES:-single_run_static,single_run,ensemble,ensemble_upper}"
 BUDGETS="${BUDGETS:-50 200}"
 ls "$A/caliber/manifests" | grep '__da39a3ee5e__' | sed 's/__seed[0-9]*\.json$//' | sort | uniq -c |
@@ -14,6 +15,7 @@ while read -r n key; do
     (( n >= MIN_MEMBERS )) || continue
     system=${key%%__*}; rest=${key#*__}; dataset=${rest%%__*}
     [[ "$dataset" =~ $DS_REGEX ]] || continue
+    [[ "$system" =~ $SYS_REGEX ]] || continue
     for B in $BUDGETS; do
         python -m caliber.tiers --artifact_dir "$A" --system "$system" --dataset "$dataset" \
             --budget "$B" --rules "$RULES" --quick --single_all 2>&1 | grep -v "Warn\|read_csv\|nltk"
