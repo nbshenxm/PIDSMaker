@@ -100,7 +100,10 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
     return case_of, cases
 
 
-def evaluate(st, case_of, cases, B, tz):
+def evaluate(st, case_of, cases, B, tz, attacks=None):
+    """attacks: label-export attack list; an attack counts as handled when any of its nodes is
+    in an automated case or in a case reviewed within capacity (attack-level detection, as in
+    Orthrus and the ADP metric of Bilot et al.)."""
     y, node, t = st["y"], st["node"], st["t1"]
     days = day_of(t, tz)
     nd = max(len(np.unique(days)), 1)
@@ -144,7 +147,18 @@ def evaluate(st, case_of, cases, B, tz):
         "attack_entities_reviewed": len(rev_ent - auto_ent),
         "attack_entities_handled": len(auto_ent | rev_ent),
         "attack_entities": len(set(node[y])),
+        **_attack_level(attacks, set(node[y]), auto_ent | rev_ent, auto_ent),
     }
+
+
+def _attack_level(attacks, present, handled, automated):
+    if not attacks:
+        return {}
+    in_test = [set(a["nids"]) & present for a in attacks]
+    in_test = [a for a in in_test if a]
+    return {"attacks": len(in_test),
+            "attacks_handled": sum(bool(a & handled) for a in in_test),
+            "attacks_automated": sum(bool(a & automated) for a in in_test)}
 
 
 def main():
@@ -157,6 +171,8 @@ def main():
     ap.add_argument("--kappa", type=float, default=1.645,
                     help="confidence-interval half-width in ensemble standard errors")
     ap.add_argument("--rules", default="ensemble,ensemble_upper,ensemble_ci,single_run")
+    ap.add_argument("--quick", action="store_true",
+                    help="only all-to-triage and B_auto=0.25 (eta_act=1.0)")
     args = ap.parse_args()
     cache = os.path.join(args.artifact_dir, "caliber", "cache")
     members = data.group_manifests(data.load_manifests(
@@ -176,11 +192,13 @@ def main():
     sem_val = np.nan_to_num(np.nanstd(st["Z_val"], 0) / np.sqrt(M))
     for score_name in args.rules.split(","):
         S_act = cal_act = None
-        if score_name == "single_run":
+        static = score_name.endswith("_static")    # fixed validation threshold, no controller
+        base = score_name[:-len("_static")] if static else score_name
+        if base == "single_run":
             S, cal = st["Z"][0], st["Z_val"][0]
-        elif score_name == "ensemble":
+        elif base == "ensemble":
             S, cal = st["S"], st["S_val"]
-        elif score_name == "ensemble_upper":   # review on the upper bound, act on the mean
+        elif base == "ensemble_upper":   # review on the upper bound, act on the mean
             S, cal = st["S"] + args.kappa * sem, st["S_val"] + args.kappa * sem_val
             S_act, cal_act = st["S"], st["S_val"]
         else:   # ensemble_ci: review on the upper bound, act on the lower bound
@@ -196,17 +214,21 @@ def main():
         # The act tier's budget is ~100x smaller than the review budget, so its controller needs
         # a proportionally larger step; we sweep it (in validation-score SDs).
         settings = [(None, None)] + [(b, e) for b in [0.25, 1.0] for e in [0.2, 1.0]]
+        if args.quick:
+            settings = [(None, None), (0.25, 1.0)]
+        if static:
+            settings = [(None, None)]
         for b_auto, eta_a in settings:
             for audit in [0.05]:
                 rng = np.random.default_rng(0)
                 ka = max(int((b_auto or 1) * nvd), 1)
                 q_act0 = float(np.sort(cal_act)[-ka])
                 case_of, cases = replay_tiers(
-                    S, st["t1"], st["w"], st["y"], lin, B, q0, 0.02 * sd,
+                    S, st["t1"], st["w"], st["y"], lin, B, q0, 0.0 if static else 0.02 * sd,
                     2.0, audit if b_auto is not None else 0.0,
                     (eta_a or 0.02) * sd, q_act0 if b_auto is not None else np.inf, rng,
                     B_auto=b_auto, S_act=S_act)
-                r = evaluate(st, case_of, cases, B, tz)
+                r = evaluate(st, case_of, cases, B, tz, labels.get("attacks"))
                 fa = [c for c in cases if c["tier"] == "A" and not c["y"]]
                 nd = max(len(np.unique(day_of(st["t1"], tz))), 1)
                 r["false_automations_per_day"] = len(fa) / nd
@@ -217,7 +239,9 @@ def main():
                       f"(all-to-triage {r['all_to_triage_load_per_day']:6.1f}) auto share={r['automation_share']:.2f} "
                       f"prec A={r['precision_A']:.2f} B={r['precision_B']:.3f} | attack entities "
                       f"auto={r['attack_entities_automated']} reviewed={r['attack_entities_reviewed']} "
-                      f"handled={r['attack_entities_handled']}/{r['attack_entities']}", flush=True)
+                      f"handled={r['attack_entities_handled']}/{r['attack_entities']} | attacks "
+                      f"{r.get('attacks_handled', '-')}/{r.get('attacks', '-')} "
+                      f"(auto {r.get('attacks_automated', '-')})", flush=True)
     rep = os.path.join(args.artifact_dir, "caliber", "reports")
     with open(os.path.join(rep, f"tiers_{args.system}_{args.dataset}_{args.group}_B{int(B)}.json"),
               "w", encoding="utf-8") as fh:
