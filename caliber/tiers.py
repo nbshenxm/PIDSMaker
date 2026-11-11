@@ -67,9 +67,9 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
     flood_cap: at most this many new individual cases per batch ("auto": one hour of budget,
     None: no cap). Alerting units of a batch open cases in descending score order; once the cap
     is reached, the batch's remaining new alerts join one bulk review case, so a single batch
-    delivers at most flood_cap + 1 cases to analysts. After a flood the threshold rises just
-    above the batch's highest overflowing score, by at most eta*B (one day of budget), so it
-    reacts to the pressure without over-correcting. Bulk cases are never automated.
+    delivers at most flood_cap + 1 cases to analysts. After a flood the threshold rises by the
+    flood's size in budget units (at most eta*B, one day of budget), but no further than needed
+    for the batch to have stayed within the cap. Bulk cases are never automated.
     refund_delay_ns: an analyst's verdict arrives this long after a case opens; a case that is
     malicious by then (any of its units so far) is refunded at that time, never earlier.
     act_key / act_seen: novelty gate for the act tier. A case may be automated only if the
