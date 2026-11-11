@@ -143,12 +143,15 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
         q_prev = q_rev
         q_rev += eta * (n_rev - ref_rev - B * dt)
         if bulk is not None:
-            # flood: raise the threshold just enough that this batch would have stayed within the
-            # cap (above its highest overflowing score), by at most one day of budget (eta*B).
-            # The step only ever raises q relative to the plain update, so Proposition 1 holds
-            # with N = cap + 1, and a flood far above the threshold cannot blind it for longer
-            # than about a day.
-            q_rev = max(q_rev, min(q_prev + eta * B, float(s_bulk) + 1e-9))
+            # flood: raise the threshold by the flood's size in budget units (the cases it would
+            # have opened, at most one day of budget, eta*B), but no further than needed for this
+            # batch to have stayed within the cap (just above its highest overflowing score).
+            # A dense flood just above the threshold thus moves it little; a large flood far above
+            # it moves it at most one day's worth. The step only ever raises q relative to the plain
+            # update, so Proposition 1 holds with N = cap + 1.
+            by_size = eta * min(n_rev - 1 + n_bulk, B)
+            needed = float(s_bulk) + 1e-9 - q_prev
+            q_rev = max(q_rev, q_prev + min(by_size, needed))
         if B_auto is not None:
             # false-automation budget: same controller as the review budget
             q_act += eta_act * (n_auto - ref_auto - B_auto * dt)
