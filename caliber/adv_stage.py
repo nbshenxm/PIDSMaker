@@ -31,17 +31,17 @@ def stage(m, cache):
     src = os.path.join(m["training_task_path"], "trained_models", f"model_epoch_{ep}", "state_dict.pkl")
     if not os.path.exists(src):
         raise FileNotFoundError(src)
-    # word2vec of this run's featurization task (the training task path's sibling chain)
-    root = m["training_task_path"].split("/training/")[0]
-    w2v = sorted(glob.glob(os.path.join(root, "featurization", m["dataset"], "featurization", "*",
-                                        "stored_models", "word2vec.model")),
-                 key=os.path.getmtime)
-    if not w2v:
-        raise FileNotFoundError("word2vec.model for " + m["dataset"])
+    # word2vec of THIS run's featurization task, derived from its own configuration. (Picking the
+    # newest word2vec of the dataset, as an earlier version did, can pair the frozen weights with
+    # another configuration's features; Velox and Orthrus featurize differently.)
+    from caliber.pidsmaker_bridge import load_cfg
+    w2v = os.path.join(load_cfg(m["argv"]).featurization._model_dir, "word2vec.model")
+    if not os.path.exists(w2v):
+        raise FileNotFoundError(w2v)
     dst = os.path.join(WEIGHTS_ROOT, m["system"], m["dataset"], f"seed{m['seed']}")
     os.makedirs(dst, exist_ok=True)
     shutil.copy2(src, os.path.join(dst, "state_dict.pkl"))
-    for f in glob.glob(w2v[-1] + "*"):                 # word2vec.model (+ .npy side files)
+    for f in glob.glob(w2v + "*"):                     # word2vec.model (+ .npy side files)
         shutil.copy2(f, os.path.join(dst, os.path.basename(f)))
     return dst, ep
 
