@@ -93,3 +93,41 @@ def case_keys(st, artifact_dir, dataset, meta, k=1):
             partner = partner.copy()
             partner[selfloop] = mapped.fillna(pd.Series(node[selfloop])).astype(np.int64).values
     return lineage_keys(node, partner, parents, process_predicate(parents, meta), k), True
+
+
+def _acting_process(node, partner, is_process, owners):
+    """The process behind each unit: the unit itself if it is a process, else its partner process
+    (other endpoint of its most anomalous edge), else, for detectors without edges, its owner."""
+    node = np.asarray(node, dtype=np.int64)
+    partner = node.copy() if partner is None else np.asarray(partner, dtype=np.int64)
+    if owners is not None:
+        selfloop = partner == node
+        if selfloop.any():
+            mapped = pd.Series(node[selfloop]).map(owners)
+            partner = partner.copy()
+            partner[selfloop] = mapped.fillna(pd.Series(node[selfloop])).astype(np.int64).values
+    return np.where(is_process(node), node, np.where(is_process(partner), partner, -1))
+
+
+def executable_keys(st, artifact_dir, dataset, meta):
+    """Executable (process image path) behind each test and validation unit, as integer keys;
+    units without a known process get a unique negative key. Used by the act tier's novelty gate."""
+    if meta is None or "type" not in meta:
+        return -(st["node"].astype(np.int64) + 1), -(st["node_val"].astype(np.int64) + 1)
+    sub = meta[meta["type"] == "subject"]
+    path_of = pd.Series(sub["path"].fillna("").astype(str).values, index=sub["node"].astype(np.int64).values)
+    procs = set(path_of.index)
+    is_proc = lambda x: np.isin(np.asarray(x, dtype=np.int64), np.fromiter(procs, dtype=np.int64))
+    owners = load_owners(artifact_dir, dataset)
+    codes = {}
+    def keys(node, partner):
+        p = _acting_process(node, partner, is_proc, owners)
+        paths = pd.Series(p).map(path_of).fillna("")
+        out = np.empty(len(p), dtype=np.int64)
+        for i, (pp, path) in enumerate(zip(p, paths)):
+            if pp < 0 or not path:
+                out[i] = -(int(node[i]) + 1)
+            else:
+                out[i] = codes.setdefault(path, len(codes))
+        return out
+    return keys(st["node"], st.get("partner")), keys(st["node_val"], None)

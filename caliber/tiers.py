@@ -30,7 +30,7 @@ from scipy.stats import beta
 
 from caliber import data
 from caliber.budget import DAY, HOUR
-from caliber.lineage import case_keys
+from caliber.lineage import case_keys, executable_keys
 from caliber.online import day_of, ensemble_stream
 
 # Review-controller step: a full day's budget error (B surplus cases) moves the threshold by
@@ -56,7 +56,7 @@ def flood_cap_for(B):
 
 def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
                  max_gap_ns=HOUR, window_audits=50, B_auto=None, S_act=None,
-                 flood_cap="auto", refund_delay_ns=0):
+                 flood_cap="auto", refund_delay_ns=0, act_key=None, act_seen=None):
     """B_auto: if set, q_act is driven by a false-automation budget instead of a precision
     target: at most ~B_auto benign cases per day may be acted on automatically. Same
     label-free controller as the review budget (Proposition 1): every new tier-A case counts
@@ -71,7 +71,12 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
     flood's size, up to B, so one batch moves the threshold by at most eta*B (the N of
     Proposition 1 becomes B). Bulk cases are never automated.
     refund_delay_ns: an analyst's verdict arrives this long after a case opens; a case that is
-    malicious by then (any of its units so far) is refunded at that time, never earlier."""
+    malicious by then (any of its units so far) is refunded at that time, never earlier.
+    act_key / act_seen: novelty gate for the act tier. A case may be automated only if the
+    executable of its first unit (act_key) has not alerted before: not in act_seen (alerts on the
+    benign validation days) and not in any earlier case. Benign false alarms recur (updates,
+    scheduled jobs, the same noisy tool); attack processes are new."""
+    seen = set(act_seen or ())
     S_act = S if S_act is None else S_act
     cap = flood_cap_for(B) if flood_cap == "auto" else flood_cap
     order = np.lexsort((t, w))
@@ -100,8 +105,13 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
                     pending.append((t[i] + refund_delay_ns, bulk))
                 n_bulk += 1                    # cases the flood would have opened
                 c = open_case[kh] = bulk
+            if act_key is not None:
+                novel = act_key[i] not in seen
+                seen.add(act_key[i])
+            else:
+                novel = True
             if c is None:
-                tier = "A" if S_act[i] >= q_act else "B"
+                tier = "A" if (S_act[i] >= q_act and novel) else "B"
                 aud = tier == "A" and rng.random() < audit
                 cases.append({"tier": tier, "audited": aud, "y": False, "flood": False})
                 c = len(cases) - 1
@@ -275,6 +285,7 @@ def main():
     tz = labels.get("timezone", "US/Eastern")
     B = args.budget
     lin, has_lin = case_keys(st, args.artifact_dir, args.dataset, meta)
+    exe_key, exe_val = executable_keys(st, args.artifact_dir, args.dataset, meta)
     nvd = max(len(members[0].get("val_dates", [])), 1)
     out = {}
     print(f"== {args.system}/{args.dataset} B={B} lineage={'yes' if has_lin else 'no'}")
@@ -293,9 +304,15 @@ def main():
             S, cal = st["Z"][int(idx or 0)], st["Z_val"][int(idx or 0)]
         elif base == "ensemble":
             S, cal = st["S"], st["S_val"]
-        elif base == "ensemble_upper":   # review on the upper bound, act on the mean
+        elif base.startswith("ensemble_upper"):
+            # review on the upper bound; act on the mean (default), or on the median member
+            # ("_median": a majority of runs must clear the act threshold); "_novel" also requires
+            # that the acting executable has not alerted before (validation or earlier in the run)
             S, cal = st["S"] + args.kappa * sem, st["S_val"] + args.kappa * sem_val
-            S_act, cal_act = st["S"], st["S_val"]
+            if "_median" in base:
+                S_act, cal_act = np.nanmedian(st["Z"], 0), np.nanmedian(st["Z_val"], 0)
+            else:
+                S_act, cal_act = st["S"], st["S_val"]
         else:   # ensemble_ci: review on the upper bound, act on the lower bound
             S, cal = st["S"] + args.kappa * sem, st["S_val"] + args.kappa * sem_val
             S_act, cal_act = st["S"] - args.kappa * sem, st["S_val"] - args.kappa * sem_val
@@ -304,6 +321,9 @@ def main():
         k = min(max(int(B * nvd), 1), len(cal))
         q0 = float(np.sort(cal)[-k])
         sd = float(np.std(cal)) or 1.0
+        # executables that already alerted on the benign validation day(s) at the start threshold
+        U_val = st["S_val"] + args.kappa * sem_val
+        seen_val = set(exe_val[np.isfinite(U_val) & (U_val >= q0)].tolist())
         # baseline: all alerts to triage (no automation); then false-automation budgets.
         # Warm start: the validation threshold that would give ~B_auto/day (top-1 when < 1/day).
         # The act tier's budget is ~100x smaller than the review budget, so its controller needs
@@ -322,7 +342,9 @@ def main():
                     S, st["t1"], st["w"], st["y"], lin, B, q0, 0.0 if static else review_step(cal, B),
                     2.0, audit if b_auto is not None else 0.0,
                     (eta_a or 0.02) * sd, q_act0 if b_auto is not None else np.inf, rng,
-                    B_auto=b_auto, S_act=S_act, flood_cap=None if static else "auto")
+                    B_auto=b_auto, S_act=S_act, flood_cap=None if static else "auto",
+                    act_key=exe_key if "_novel" in base else None,
+                    act_seen=seen_val if "_novel" in base else None)
                 r = evaluate(st, case_of, cases, B, tz, labels.get("attacks"))
                 fa = [c for c in cases if c["tier"] == "A" and not c["y"]]
                 nd = max(len(np.unique(day_of(st["t1"], tz))), 1)
