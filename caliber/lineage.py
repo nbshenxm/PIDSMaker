@@ -76,14 +76,16 @@ def load_owners(artifact_dir, dataset):
     return pd.Series(df["process"].astype(np.int64).values, index=df["object"].astype(np.int64).values)
 
 
-def case_keys(st, artifact_dir, dataset, meta, k=1):
+def case_keys(st, artifact_dir, dataset, meta, k=1, split="test"):
     """Case key per unit: k-th ancestor of the acting process (Section 'Cases, not units').
-    Returns (keys, has_lineage). Without a process tree, cases fall back to entities."""
-    node = st["node"].astype(np.int64)
+    Returns (keys, has_lineage). Without a process tree, cases fall back to entities.
+    split="val": keys of the validation units (used to calibrate the warm start in cases)."""
+    sfx = "_val" if split == "val" else ""
+    node = np.asarray(st["node" + sfx]).astype(np.int64)
     parents = load_parents(artifact_dir, dataset)
     if parents is None:
         return node, False
-    partner = st.get("partner")
+    partner = st.get("partner" + sfx)
     partner = node.copy() if partner is None else np.asarray(partner, dtype=np.int64)
     selfloop = partner == node
     if selfloop.any():
@@ -130,4 +132,4 @@ def executable_keys(st, artifact_dir, dataset, meta):
             else:
                 out[i] = codes.setdefault(path, len(codes))
         return out
-    return keys(st["node"], st.get("partner")), keys(st["node_val"], None)
+    return keys(st["node"], st.get("partner")), keys(st["node_val"], st.get("partner_val"))

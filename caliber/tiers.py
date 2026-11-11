@@ -49,6 +49,27 @@ def wilson_lower(pos, n, conf=0.9):
     return float(beta.ppf(1 - conf, pos + 0.5, n - pos + 0.5))      # Jeffreys interval
 
 
+def case_threshold(S_val, t_val, keys_val, B, n_val_days):
+    """Warm start: the validation threshold at which ~B cases per day would have opened, with
+    cases counted as the controller counts them ((case key, hour) pairs). Calibrating on alert
+    units instead starts far too high once units are grouped into cases: one case holds many
+    units (about 18 on ATLASv2, 30 on OpTC), so a unit-calibrated start delivers a few percent of
+    B and the controller needs many days to come down."""
+    S_val = np.asarray(S_val, float)
+    m = np.isfinite(S_val)
+    s = S_val[m]
+    if len(s) == 0:
+        return np.inf
+    order = np.argsort(-s, kind="stable")
+    kk = np.asarray(keys_val, np.int64)[m][order]
+    hh = (np.asarray(t_val, np.int64)[m][order] // HOUR).astype(np.int64)
+    _, first = np.unique(np.stack([kk, hh], 1), axis=0, return_index=True)
+    first = np.sort(first)                       # positions (in score order) of each new case
+    target = max(int(B * n_val_days), 1)
+    pos = first[min(target, len(first)) - 1]
+    return float(s[order][pos])
+
+
 def flood_cap_for(B):
     """Default per-batch cap on new individual cases: one hour of the review budget."""
     return max(1, int(np.ceil(B / 24.0)))
@@ -294,6 +315,7 @@ def main():
     tz = labels.get("timezone", "US/Eastern")
     B = args.budget
     lin, has_lin = case_keys(st, args.artifact_dir, args.dataset, meta)
+    lin_val, _ = case_keys(st, args.artifact_dir, args.dataset, meta, split="val")
     exe_key, exe_val = executable_keys(st, args.artifact_dir, args.dataset, meta)
     nvd = max(len(members[0].get("val_dates", [])), 1)
     out = {}
@@ -325,10 +347,9 @@ def main():
         else:   # ensemble_ci: review on the upper bound, act on the lower bound
             S, cal = st["S"] + args.kappa * sem, st["S_val"] + args.kappa * sem_val
             S_act, cal_act = st["S"] - args.kappa * sem, st["S_val"] - args.kappa * sem_val
+        q0 = case_threshold(cal, st["t_val"], lin_val, B, nvd)   # B cases/day on validation
         cal = cal[np.isfinite(cal)]
         cal_act = cal if cal_act is None else cal_act[np.isfinite(cal_act)]
-        k = min(max(int(B * nvd), 1), len(cal))
-        q0 = float(np.sort(cal)[-k])
         sd = float(np.std(cal)) or 1.0
         # executables that already alerted on the benign validation day(s) at the start threshold
         U_val = st["S_val"] + args.kappa * sem_val

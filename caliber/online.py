@@ -69,6 +69,7 @@ def ensemble_stream(members, labels, window="batch", epoch_rule="min_val_loss", 
         "t_val": tv["t1"].values,                  # validation unit times (rate calibration)
         "node_val": val_idx.get_level_values("node").values,
         "partner": tt["partner"].values if "partner" in tt else None,
+        "partner_val": tv["partner"].values if "partner" in tv else None,
     }
 
 

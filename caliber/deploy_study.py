@@ -28,7 +28,7 @@ from caliber import data
 from caliber.budget import DAY, HOUR
 from caliber.lineage import case_keys
 from caliber.online import day_of, ensemble_stream
-from caliber.tiers import _with_borrower, replay_tiers, review_step, unit_attacks
+from caliber.tiers import _with_borrower, case_threshold, replay_tiers, review_step, unit_attacks
 
 BUDGETS = [20, 50, 100, 200, 500]
 MAX_WAIT_DAYS = 3
@@ -158,11 +158,12 @@ def allowlist_scores(nodes, times, artifact_dir, dataset, meta):
 
 
 def one_deployment(S, S_val, st, keys, B, nvd, policy, attacks, tz, cand=None,
-                   verdict_delay_ns=8 * HOUR, max_gap_ns=HOUR):
-    """policy: static | prevday | daytopB | hindsight | caliber | caliber_nocap (no flood cap)."""
+                   verdict_delay_ns=8 * HOUR, max_gap_ns=HOUR, keys_val=None):
+    """policy: static | prevday | daytopB | hindsight | caliber | caliber_nocap (no flood cap).
+    Every policy starts from the validation threshold that would have opened B cases per day
+    (keys_val: case keys of the validation units)."""
     cal = S_val[np.isfinite(S_val)]
-    k = min(max(int(B * nvd), 1), len(cal))
-    q0 = float(np.sort(cal)[-k])
+    q0 = case_threshold(S_val, st["t_val"], st["node_val"] if keys_val is None else keys_val, B, nvd)
     n_flood = 0
     if policy in ("hindsight", "prevday", "daytopB"):
         open_t, score, case_att = fixed_threshold_cases(cand, policy, q0, B)
@@ -216,6 +217,7 @@ def main():
     st = ensemble_stream(members, labels, cache_dir=cache)
     tz = labels.get("timezone", "US/Eastern")
     keys, has_lin = case_keys(st, args.artifact_dir, args.dataset, meta)
+    keys_val, _ = case_keys(st, args.artifact_dir, args.dataset, meta, split="val")
     print(f"cases by {'lineage' if has_lin else 'entity'}", flush=True)
     nvd = max(len(members[0].get("val_dates", [])), 1)
     Z, Zv, M = st["Z"], st["Z_val"], st["Z"].shape[0]
@@ -243,7 +245,8 @@ def main():
                 cand_cache[key] = candidate_cases(S, st, keys, labels["attacks"], tz)
             for policy in args.policies.split(","):
                 r = one_deployment(S, S_val, st, keys, B, nvd, policy, labels["attacks"], tz,
-                                   cand_cache[key], max_gap_ns=int(args.gap_cap_h * HOUR))
+                                   cand_cache[key], max_gap_ns=int(args.gap_cap_h * HOUR),
+                                   keys_val=keys_val)
                 rows.append({"B": B, "runs": kind, "members": subset, "policy": policy, **r})
         print(f"B={B} done", flush=True)
     rep = os.path.join(args.artifact_dir, "caliber", "reports")
