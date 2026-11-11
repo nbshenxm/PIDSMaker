@@ -196,8 +196,11 @@ def test_node_level(
             # CALIBER: also score validation nodes exactly as test nodes are scored (kNN distance
             # to a standardized sample of the same window, relative to the benign mean distance),
             # so that thresholds can be calibrated on benign validation scores.
+            # (tiny windows can hold fewer nodes than n_neighbors, as the training-distance
+            # query above already allows for)
             val_dist, _ = nbrs.kneighbors(
-                (x_train - x_train_mean) / x_train_std, n_neighbors=n_neighbors
+                (x_train - x_train_mean) / x_train_std,
+                n_neighbors=min(n_neighbors, x_train_sampled.shape[0]),
             )
             val_score = val_dist.mean(axis=1) / mean_distance_train
 
