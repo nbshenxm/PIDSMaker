@@ -66,10 +66,30 @@ def labels_for(manifest, artifact_dir):
                        manifest.get("mimicry_edge_num") or 0)
 
 
+def _align_edr_times(labels, dataset):
+    """EDR datasets (ATLASv2, CARBANAKv2) store event timestamps as local wall-clock time read as
+    UTC, while the exported attack windows are converted from local time to true UTC. The two
+    differ by the time-zone offset (5 h for US/Central in summer): on ATLASv2 every attack's
+    labelled processes are active exactly that long before their window. PIDSMaker's own
+    evaluation matches node ids only and never sees the offset. Shift the windows onto the event
+    clock."""
+    if not dataset.upper().endswith("_EDR") or labels.get("_edr_aligned"):
+        return labels
+    tz = labels.get("timezone") or "UTC"
+    def shift(ns):
+        off = pd.Timestamp(int(ns), unit="ns", tz="UTC").tz_convert(tz).utcoffset()
+        return int(ns + off.total_seconds() * 1e9)
+    labels = dict(labels, _edr_aligned=True)
+    labels["attacks"] = [dict(a, start_ns=shift(a["start_ns"]), end_ns=shift(a["end_ns"]))
+                         for a in labels["attacks"]]
+    return labels
+
+
 def load_labels(artifact_dir, dataset, gt_version, mimicry_edge_num=0):
     d = os.path.join(artifact_dir, "caliber", "labels", labels_key(dataset, gt_version, mimicry_edge_num))
     with open(os.path.join(d, "labels.json"), encoding="utf-8") as f:
         labels = json.load(f)
+    labels = _align_edr_times(labels, dataset)
     meta_path = os.path.join(d, "node_meta.csv.gz")
     meta = pd.read_csv(meta_path) if os.path.exists(meta_path) else None
     return labels, meta

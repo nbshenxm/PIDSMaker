@@ -205,11 +205,12 @@ def unit_attacks(node, t, idx, attacks, slack_ns=HOUR):
     its entity is in k's ground truth AND its time lies in k's interval (window end t within
     [start, end + slack]). Entities shared by several attacks (e.g. a browser used in two THEIA
     attacks) are credited only to the attack running at the time."""
+    from caliber.pilot import LABEL_PAD_NS
     sets = [set(a["nids"]) for a in attacks]
     out = {}
     for i in idx:
-        out[i] = [k for k, a in enumerate(attacks)
-                  if node[i] in sets[k] and a["start_ns"] <= t[i] <= a["end_ns"] + slack_ns]
+        out[i] = [k for k, a in enumerate(attacks) if node[i] in sets[k]
+                  and a["start_ns"] - LABEL_PAD_NS <= t[i] <= a["end_ns"] + slack_ns]
     return out
 
 
@@ -235,8 +236,8 @@ def _with_borrower(labels, manifest, artifact_dir):
     if not spec.get("borrow"):
         return labels
     import glob
-    for p in glob.glob(os.path.join(artifact_dir, "construction", "construction", "*",
-                                    manifest["dataset"], "adversary.json")):
+    for p in glob.glob(os.path.join(artifact_dir, "construction", manifest["dataset"],
+                                    "construction", "*", "adversary.json")):
         with open(p, encoding="utf-8") as f:
             rec = json.load(f)
         if rec.get("spec") == spec and rec.get("borrower") is not None:

@@ -145,6 +145,11 @@ def unit_table(df, unit="node", window="batch", topk=5):
     raise ValueError(unit)
 
 
+# Labelled attack times are rounded (often to the minute or the hour); a unit counts as part of an
+# attack when it overlaps the attack interval padded by this much on each side.
+LABEL_PAD_NS = 15 * 60 * 10**9
+
+
 def unit_labels(tbl, unit, labels, ew_tbl=None):
     """Ground truth per unit. Time-based units are malicious only when the entity is in
     an attack's ground truth AND the unit's time span overlaps that attack's interval."""
@@ -155,7 +160,8 @@ def unit_labels(tbl, unit, labels, ew_tbl=None):
         t0, t1 = tbl["t0"].values, tbl["t1"].values
         y = np.zeros(len(tbl), bool)
         for a in labels["attacks"]:
-            y |= np.isin(nodes, a["nids"]) & (t1 >= a["start_ns"]) & (t0 <= a["end_ns"])
+            y |= (np.isin(nodes, a["nids"]) & (t1 >= a["start_ns"] - LABEL_PAD_NS)
+                  & (t0 <= a["end_ns"] + LABEL_PAD_NS))
         return y
     if unit == "window":
         y_ew = unit_labels(ew_tbl, "entity_window", labels)
