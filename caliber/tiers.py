@@ -75,9 +75,21 @@ def flood_cap_for(B):
     return max(1, int(np.ceil(B / 24.0)))
 
 
+# Token bucket (rate limiting, as in network traffic policing and IDS alert rate filters): an
+# analyst-facing case needs a token; tokens refill at B per day up to a depth of BUCKET_H hours
+# of budget. Over any window of t hours analysts receive at most D + B*t/24 cases, D = B*BUCKET_H/24,
+# whatever the data or an attacker does. Default: one shift (8 h).
+BUCKET_H = 8.0
+
+
+def bucket_depth(B, bucket_h=BUCKET_H):
+    return max(1.0, B * bucket_h / 24.0)
+
+
 def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
                  max_gap_ns=HOUR, window_audits=50, B_auto=None, S_act=None,
-                 flood_cap="auto", refund_delay_ns=0, act_key=None, act_seen=None):
+                 flood_cap="auto", refund_delay_ns=0, act_key=None, act_seen=None,
+                 bucket_h=None):
     """B_auto: if set, q_act is driven by a false-automation budget instead of a precision
     target: at most ~B_auto benign cases per day may be acted on automatically. Same
     label-free controller as the review budget (Proposition 1): every new tier-A case counts
@@ -96,10 +108,21 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
     act_key / act_seen: novelty gate for the act tier. A case may be automated only if the
     executable of its first unit (act_key) has not alerted before: not in act_seen (alerts on the
     benign validation days) and not in any earlier case. Benign false alarms recur (updates,
-    scheduled jobs, the same noisy tool); attack processes are new."""
+    scheduled jobs, the same noisy tool); attack processes are new.
+    bucket_h: token-bucket admission instead of the per-batch flood cap (flood_cap is ignored).
+    A new review case (or audit) needs a token; tokens refill at B/day over real elapsed time up
+    to D = bucket_depth(B, bucket_h). Without a token, the alert joins one pending summary case
+    that is delivered, as a single item, when the next token arrives (never automated). The
+    threshold controller counts demand (every case that would have opened) and each batch's
+    update is clipped to +-eta*D (integrator anti-windup): a burst, or a gap in the data, moves the
+    threshold by at most one bucket's worth, which replaces the gap cap and the flood step."""
     seen = set(act_seen or ())
     S_act = S if S_act is None else S_act
-    cap = flood_cap_for(B) if flood_cap == "auto" else flood_cap
+    use_bucket = bucket_h is not None
+    D = bucket_depth(B, bucket_h) if use_bucket else None
+    tokens = D
+    pend = None                                    # pending summary case awaiting a token
+    cap = None if use_bucket else (flood_cap_for(B) if flood_cap == "auto" else flood_cap)
     order = np.lexsort((t, w))
     case_of = np.full(len(S), -1, np.int64)        # case index per alerted unit
     cases = []                                     # dicts: tier, audited, y, flood
@@ -111,13 +134,26 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
     for lo, hi in zip(np.r_[0, bounds], np.r_[bounds, len(order)]):
         ix = order[lo:hi]
         tmax = t[ix].max()
-        dt = 0.0 if clock is None else min(max(tmax - clock, 0), max_gap_ns) / DAY
+        elapsed = 0.0 if clock is None else max(tmax - clock, 0) / DAY
+        dt = elapsed if use_bucket else min(elapsed * DAY, max_gap_ns) / DAY
         clock = tmax if clock is None else max(clock, tmax)
+        if use_bucket:
+            tokens = min(D, tokens + B * elapsed)
         n_rev, n_auto, opened, bulk, n_bulk = 0, 0, 0, None, 0
+        n_over = 0                                 # bucket: review cases that found no token
         al = ix[S[ix] >= q_rev]
         for i in al[np.argsort(-S[al], kind="stable")]:
             kh = (keys[i], int(t[i] // HOUR))
             c = open_case.get(kh)
+            if c is None and use_bucket and tokens < 1.0:
+                wants_review = not (S_act[i] >= q_act and (act_key is None or act_key[i] not in seen))
+                if wants_review:                   # no token: join the pending summary case
+                    if pend is None:
+                        cases.append({"tier": "B", "audited": False, "y": False, "flood": True,
+                                      "t_deliver": None})
+                        pend = len(cases) - 1
+                    n_over += 1
+                    c = open_case[kh] = pend
             if c is None and cap is not None and opened >= cap:
                 if bulk is None:               # flood: one bulk review case for the rest
                     cases.append({"tier": "B", "audited": False, "y": False, "flood": True})
@@ -142,12 +178,20 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
                 opened += 1
                 n_rev += int(tier == "B" or aud)
                 n_auto += int(tier == "A")
+                if use_bucket and (tier == "B" or aud):
+                    tokens -= 1.0
                 pending.append((t[i] + refund_delay_ns, c))
                 if aud:
                     audits.append(bool(y[i]))
                     audits[:] = audits[-window_audits:]
             cases[c]["y"] = cases[c]["y"] or bool(y[i])
             case_of[i] = c
+        if use_bucket and pend is not None and tokens >= 1.0:
+            # deliver the summary of the overflow as one item with the next token
+            cases[pend]["t_deliver"] = tmax
+            tokens -= 1.0
+            pending.append((tmax + refund_delay_ns, pend))
+            pend = None
         # verdicts that have arrived: confirmed attacks are refunded
         ref_rev = ref_auto = 0
         if pending:
@@ -162,7 +206,12 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
                         ref_rev += 1
         # review budget (tier B + audits), counting the cases actually delivered
         q_prev = q_rev
-        q_rev += eta * (n_rev - ref_rev - B * dt)
+        if use_bucket:
+            # demand (every review case that would have opened) vs budget, clipped to one bucket
+            step = eta * (n_rev + n_over - ref_rev - B * dt)
+            q_rev += float(np.clip(step, -eta * D, eta * D))
+        else:
+            q_rev += eta * (n_rev - ref_rev - B * dt)
         if bulk is not None:
             # flood: raise the threshold just enough that this batch would have stayed within the
             # cap (just above its highest overflowing score), by at most one day of budget (eta*B).
@@ -174,7 +223,8 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
             q_rev = max(q_rev, min(q_prev + eta * B, float(s_bulk) + 1e-9))
         if B_auto is not None:
             # false-automation budget: same controller as the review budget
-            q_act += eta_act * (n_auto - ref_auto - B_auto * dt)
+            dt_act = min(elapsed * DAY, max_gap_ns) / DAY
+            q_act += eta_act * (n_auto - ref_auto - B_auto * dt_act)
         # automation threshold: meet the precision target on audited tier-A cases
         elif len(audits) >= 10:
             lb = wilson_lower(sum(audits), len(audits))
@@ -205,7 +255,13 @@ def evaluate(st, case_of, cases, B, tz, attacks=None):
     for i in np.flatnonzero(case_of >= 0):
         c = case_of[i]
         first_t[c] = min(first_t.get(c, t[i]), t[i])
-    rev_cases = [c for c in range(len(cases)) if (not tierA[c]) or aud[c]]
+    for c, cs in enumerate(cases):                 # bucket summary cases: delivered later or never
+        if "t_deliver" in cs and c in first_t:
+            if cs["t_deliver"] is None:
+                del first_t[c]
+            else:
+                first_t[c] = cs["t_deliver"]
+    rev_cases = [c for c in range(len(cases)) if ((not tierA[c]) or aud[c]) and c in first_t]
     by_day = {}
     for c in rev_cases:
         d = day_of(np.array([first_t[c]]), tz)[0]

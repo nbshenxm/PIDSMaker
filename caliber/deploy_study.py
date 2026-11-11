@@ -28,7 +28,8 @@ from caliber import data
 from caliber.budget import DAY, HOUR
 from caliber.lineage import case_keys
 from caliber.online import day_of, ensemble_stream
-from caliber.tiers import _with_borrower, case_threshold, replay_tiers, review_step, unit_attacks
+from caliber.tiers import (BUCKET_H, _with_borrower, case_threshold, replay_tiers, review_step,
+                           unit_attacks)
 
 BUDGETS = [20, 50, 100, 200, 500]
 MAX_WAIT_DAYS = 3
@@ -107,6 +108,19 @@ def fixed_threshold_cases(cand, policy, q0, B):
             q_of_day[d] = prev
             s = np.sort(score[days == d])
             prev = float(s[-min(int(B), len(s))]) if len(s) else prev
+    elif policy == "hourtopB":                      # online top-k: each hour's best B/24 cases,
+        hours = (open_t // HOUR).astype(np.int64)   # released at the end of that hour
+        keep = np.zeros(len(score), bool)
+        release = open_t.copy()
+        credit = 0.0
+        for h in np.unique(hours):
+            ix = np.flatnonzero(hours == h)
+            credit += B / 24.0                       # fractional quota carries over; idle
+            k = int(credit)                          # capacity does not accumulate
+            credit -= k
+            keep[ix[np.argsort(-score[ix])[:k]]] = True
+            release[ix] = (h + 1) * HOUR
+        return release[keep], score[keep], [case_att[i] for i in np.flatnonzero(keep)]
     elif policy == "daytopB":                       # Ho et al. '17: the day's top B, at day end
         keep = np.zeros(len(score), bool)
         release = open_t.copy()
@@ -158,23 +172,32 @@ def allowlist_scores(nodes, times, artifact_dir, dataset, meta):
 
 
 def one_deployment(S, S_val, st, keys, B, nvd, policy, attacks, tz, cand=None,
-                   verdict_delay_ns=8 * HOUR, max_gap_ns=HOUR, keys_val=None):
-    """policy: static | prevday | daytopB | hindsight | caliber | caliber_nocap (no flood cap).
+                   verdict_delay_ns=8 * HOUR, max_gap_ns=HOUR, keys_val=None, bucket_h=BUCKET_H):
+    """policy: static | prevday | daytopB | hourtopB | hindsight | caliber (token bucket) |
+    caliber_cap (earlier per-batch flood cap) | caliber_nocap (controller only).
     Every policy starts from the validation threshold that would have opened B cases per day
     (keys_val: case keys of the validation units)."""
     cal = S_val[np.isfinite(S_val)]
     q0 = case_threshold(S_val, st["t_val"], st["node_val"] if keys_val is None else keys_val, B, nvd)
     n_flood = 0
-    if policy in ("hindsight", "prevday", "daytopB"):
+    summary = None                                  # per case: is it a summary (bulk) item
+    if policy in ("hindsight", "prevday", "daytopB", "hourtopB"):
         open_t, score, case_att = fixed_threshold_cases(cand, policy, q0, B)
     else:
         eta = 0.0 if policy == "static" else review_step(cal, B)
-        cap = "auto" if policy == "caliber" else None      # static: as deployed today, no cap
+        if policy == "caliber":
+            kw = {"bucket_h": bucket_h}
+        else:                                       # static: as deployed today, no cap
+            kw = {"flood_cap": "auto" if policy == "caliber_cap" else None}
         case_of, cases = replay_tiers(S, st["t1"], st["w"], st["y"], keys, B, q0, eta, 2.0, 0.0,
-                                      0.0, np.inf, np.random.default_rng(0), flood_cap=cap,
-                                      refund_delay_ns=verdict_delay_ns, max_gap_ns=max_gap_ns)
+                                      0.0, np.inf, np.random.default_rng(0),
+                                      refund_delay_ns=verdict_delay_ns, max_gap_ns=max_gap_ns, **kw)
         n_flood = sum(bool(c.get("flood")) for c in cases)
         open_t, score, case_att = cases_of(case_of, cases, S, st["t1"], st["node"], st["y"], attacks)
+        summary = np.array([bool(c.get("flood")) for c in cases], bool)
+        for c, cs in enumerate(cases):              # token bucket: summary delivered later/never
+            if "t_deliver" in cs:
+                open_t[c] = np.inf if cs["t_deliver"] is None else float(cs["t_deliver"])
     days = day_of(open_t[np.isfinite(open_t)], tz) if len(open_t) else np.array([])
     # days with data (a few spill-over units across midnight do not make a monitored day)
     all_days, n_units = np.unique(day_of(st["t1"], tz), return_counts=True)
@@ -182,17 +205,63 @@ def one_deployment(S, S_val, st, keys, B, nvd, policy, attacks, tz, cand=None,
     per_day = np.array([np.sum(days == d) for d in test_days], float)
     reviewed = analyst_queue(open_t, score, B, float(st["t1"].max()))
     present = [k_ for k_, a in enumerate(attacks) if set(a["nids"]) & set(st["node"][st["y"]])]
-    ttr = {}
+    ttr, ttr_ind = {}, {}
     for c in np.flatnonzero(np.isfinite(reviewed)):
         for a in case_att[c]:
-            ttr[a] = min(ttr.get(a, np.inf), (reviewed[c] - attacks[a]["start_ns"]) / HOUR)
+            h = (reviewed[c] - attacks[a]["start_ns"]) / HOUR
+            ttr[a] = min(ttr.get(a, np.inf), h)
+            if summary is None or not summary[c]:   # seen in an individual case, not a summary
+                ttr_ind[a] = min(ttr_ind.get(a, np.inf), h)
     # attack cases never reviewed (expired in the queue): the replay refunded them at the verdict
     # delay, which overstates the refunds an analyst could have given; should stay ~0
     unrev = sum(1 for c in range(len(case_att)) if case_att[c] and not np.isfinite(reviewed[c]))
     return {"load_ratio": float(per_day.mean() / B), "worst_day_ratio": float(per_day.max() / B),
             "flood_cases": int(n_flood), "unreviewed_attack_cases": int(unrev),
             "attacks": len(present), "attacks_seen": sum(a in ttr for a in present),
-            "time_to_review_h": {str(a): float(ttr[a]) for a in present if a in ttr}}
+            "attacks_seen_individual": sum(a in ttr_ind for a in present),
+            "time_to_review_h": {str(a): float(ttr[a]) for a in present if a in ttr},
+            "time_to_review_individual_h": {str(a): float(ttr_ind[a]) for a in present
+                                            if a in ttr_ind}}
+
+
+def inject_decoys(st, Z, keys, attacks, mode, rate, hours, seed=0):
+    """Decoy flood (squealing, Patton et al. RAID'01): from each attack's start, the attacker
+    raises `rate` decoy alerts per hour for `hours` hours, each scoring above every unit of that
+    attack (worst case: decoys outrank the attack in every run). mode 'one': all decoys come from
+    the attack's own lineage (one foothold); 'many': each decoy from a distinct lineage."""
+    rng = np.random.default_rng(seed)
+    yi = np.flatnonzero(st["y"])
+    ua = unit_attacks(st["node"], st["t1"], yi, attacks)
+    order = np.argsort(st["t1"], kind="stable")
+    ts, ws = st["t1"][order], st["w"][order]
+    add_t, add_w, add_k, add_z = [], [], [], []
+    for k, a in enumerate(attacks):
+        units = np.array([i for i, ks in ua.items() if k in ks], np.int64)
+        if len(units) == 0:
+            continue
+        zmax = np.nanmax(Z[:, units], 0)
+        z = float(np.nanmax(zmax)) + 0.01
+        n = int(round(rate * hours))
+        tt = (a["start_ns"] + rng.uniform(0, hours * HOUR, n)).astype(np.int64)
+        pos = np.clip(np.searchsorted(ts, tt, side="right") - 1, 0, len(ts) - 1)
+        add_t.append(tt)
+        add_w.append(ws[pos])
+        if mode == "one":
+            add_k.append(np.full(n, keys[units[np.argmax(zmax)]], np.int64))
+        else:
+            add_k.append(-(np.arange(n, dtype=np.int64) + 1 + 10**12 + k * 10**7))
+        add_z.append(np.full(n, z))
+    if not add_t:
+        return st, Z, keys
+    t_new, w_new = np.concatenate(add_t), np.concatenate(add_w)
+    n_new = len(t_new)
+    st2 = dict(st)
+    st2["t1"] = np.concatenate([st["t1"], t_new])
+    st2["w"] = np.concatenate([st["w"], w_new])
+    st2["y"] = np.concatenate([st["y"], np.zeros(n_new, bool)])
+    st2["node"] = np.concatenate([st["node"], -(np.arange(n_new, dtype=np.int64) + 1 + 2 * 10**12)])
+    Z2 = np.hstack([Z, np.tile(np.concatenate(add_z)[None, :], (Z.shape[0], 1))])
+    return st2, Z2, np.concatenate([keys.astype(np.int64), np.concatenate(add_k)])
 
 
 def main():
@@ -202,7 +271,10 @@ def main():
     ap.add_argument("--dataset", required=True)
     ap.add_argument("--group", default="da39a3ee5e")
     ap.add_argument("--subsets", type=int, default=5, help="random ensembles per size")
-    ap.add_argument("--policies", default="static,prevday,daytopB,hindsight,caliber,caliber_nocap")
+    ap.add_argument("--policies",
+                    default="static,prevday,daytopB,hourtopB,hindsight,caliber,caliber_cap,caliber_nocap")
+    ap.add_argument("--bucket_h", type=float, default=BUCKET_H, help="token bucket depth (hours of B)")
+    ap.add_argument("--decoys", default="", help="decoy flood 'mode:rate:hours', mode one|many")
     ap.add_argument("--gap_cap_h", type=float, default=1.0, help="credited time per data gap")
     ap.add_argument("--budgets", default="", help="comma list (default: all)")
     ap.add_argument("--tag", default="", help="suffix for the report file")
@@ -226,6 +298,10 @@ def main():
         Z = allowlist_scores(st["node"], st["t1"], args.artifact_dir, args.dataset, meta)[None, :]
         Zv = allowlist_scores(st["node_val"], st["t_val"], args.artifact_dir, args.dataset, meta)[None, :]
         M = 1
+    if args.decoys:
+        mode, rate, hours = args.decoys.split(":")
+        st, Z, keys = inject_decoys(st, Z, keys, labels["attacks"], mode, float(rate), float(hours))
+        print(f"decoys: {args.decoys} -> {len(st['t1'])} units", flush=True)
     rng = np.random.default_rng(0)
     configs = [("single", [m]) for m in range(M)]
     for size in sorted({3, 5, M}):
@@ -246,7 +322,7 @@ def main():
             for policy in args.policies.split(","):
                 r = one_deployment(S, S_val, st, keys, B, nvd, policy, labels["attacks"], tz,
                                    cand_cache[key], max_gap_ns=int(args.gap_cap_h * HOUR),
-                                   keys_val=keys_val)
+                                   keys_val=keys_val, bucket_h=args.bucket_h)
                 rows.append({"B": B, "runs": kind, "members": subset, "policy": policy, **r})
         print(f"B={B} done", flush=True)
     rep = os.path.join(args.artifact_dir, "caliber", "reports")
