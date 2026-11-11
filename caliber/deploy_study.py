@@ -158,7 +158,7 @@ def allowlist_scores(nodes, times, artifact_dir, dataset, meta):
 
 
 def one_deployment(S, S_val, st, keys, B, nvd, policy, attacks, tz, cand=None,
-                   verdict_delay_ns=8 * HOUR):
+                   verdict_delay_ns=8 * HOUR, max_gap_ns=HOUR):
     """policy: static | prevday | daytopB | hindsight | caliber | caliber_nocap (no flood cap)."""
     cal = S_val[np.isfinite(S_val)]
     k = min(max(int(B * nvd), 1), len(cal))
@@ -171,7 +171,7 @@ def one_deployment(S, S_val, st, keys, B, nvd, policy, attacks, tz, cand=None,
         cap = "auto" if policy == "caliber" else None      # static: as deployed today, no cap
         case_of, cases = replay_tiers(S, st["t1"], st["w"], st["y"], keys, B, q0, eta, 2.0, 0.0,
                                       0.0, np.inf, np.random.default_rng(0), flood_cap=cap,
-                                      refund_delay_ns=verdict_delay_ns)
+                                      refund_delay_ns=verdict_delay_ns, max_gap_ns=max_gap_ns)
         n_flood = sum(bool(c.get("flood")) for c in cases)
         open_t, score, case_att = cases_of(case_of, cases, S, st["t1"], st["node"], st["y"], attacks)
     days = day_of(open_t[np.isfinite(open_t)], tz) if len(open_t) else np.array([])
@@ -202,6 +202,9 @@ def main():
     ap.add_argument("--group", default="da39a3ee5e")
     ap.add_argument("--subsets", type=int, default=5, help="random ensembles per size")
     ap.add_argument("--policies", default="static,prevday,daytopB,hindsight,caliber,caliber_nocap")
+    ap.add_argument("--gap_cap_h", type=float, default=1.0, help="credited time per data gap")
+    ap.add_argument("--budgets", default="", help="comma list (default: all)")
+    ap.add_argument("--tag", default="", help="suffix for the report file")
     ap.add_argument("--detector", default="model", choices=["model", "allowlist"],
                     help="allowlist: executable-novelty baseline on the same units (Guerra et al.)")
     args = ap.parse_args()
@@ -231,7 +234,7 @@ def main():
                     for _ in range(draws)]
     rows = []
     cand_cache = {}
-    for B in BUDGETS:
+    for B in ([int(b) for b in args.budgets.split(",")] if args.budgets else BUDGETS):
         for kind, subset in configs:
             S = np.nanmean(Z[subset], 0)
             S_val = np.nanmean(Zv[subset], 0)
@@ -240,12 +243,12 @@ def main():
                 cand_cache[key] = candidate_cases(S, st, keys, labels["attacks"], tz)
             for policy in args.policies.split(","):
                 r = one_deployment(S, S_val, st, keys, B, nvd, policy, labels["attacks"], tz,
-                                   cand_cache[key])
+                                   cand_cache[key], max_gap_ns=int(args.gap_cap_h * HOUR))
                 rows.append({"B": B, "runs": kind, "members": subset, "policy": policy, **r})
         print(f"B={B} done", flush=True)
     rep = os.path.join(args.artifact_dir, "caliber", "reports")
     tag = args.system if args.detector == "model" else "allowlist"
-    out = os.path.join(rep, f"deploy_{tag}_{args.dataset}_{args.group}.json")
+    out = os.path.join(rep, f"deploy_{tag}_{args.dataset}_{args.group}{args.tag}.json")
     with open(out, "w", encoding="utf-8") as fh:
         json.dump(rows, fh)
     summarize(rows, f"{args.system}/{args.dataset}")

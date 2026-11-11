@@ -67,7 +67,9 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
     flood_cap: at most this many new individual cases per batch ("auto": one hour of budget,
     None: no cap). Alerting units of a batch open cases in descending score order; once the cap
     is reached, the batch's remaining new alerts join one bulk review case, so a single batch
-    adds at most flood_cap + 1 cases (the N of Proposition 1). Bulk cases are never automated.
+    delivers at most flood_cap + 1 cases to analysts. The controller still registers the
+    flood's size, up to B, so one batch moves the threshold by at most eta*B (the N of
+    Proposition 1 becomes B). Bulk cases are never automated.
     refund_delay_ns: an analyst's verdict arrives this long after a case opens; a case that is
     malicious by then (any of its units so far) is refunded at that time, never earlier."""
     S_act = S if S_act is None else S_act
@@ -85,7 +87,7 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
         tmax = t[ix].max()
         dt = 0.0 if clock is None else min(max(tmax - clock, 0), max_gap_ns) / DAY
         clock = tmax if clock is None else max(clock, tmax)
-        n_rev, n_auto, opened, bulk = 0, 0, 0, None
+        n_rev, n_auto, opened, bulk, n_bulk = 0, 0, 0, None, 0
         al = ix[S[ix] >= q_rev]
         for i in al[np.argsort(-S[al], kind="stable")]:
             kh = (keys[i], int(t[i] // HOUR))
@@ -96,6 +98,7 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
                     bulk = len(cases) - 1
                     n_rev += 1
                     pending.append((t[i] + refund_delay_ns, bulk))
+                n_bulk += 1                    # cases the flood would have opened
                 c = open_case[kh] = bulk
             if c is None:
                 tier = "A" if S_act[i] >= q_act else "B"
@@ -124,8 +127,11 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
                         ref_rev += int(cases[c]["audited"])
                     else:
                         ref_rev += 1
-        # review budget (tier B + audits)
-        q_rev += eta * (n_rev - ref_rev - B * dt)
+        # review budget (tier B + audits). Analysts receive one bulk case per flooded batch, but
+        # the controller registers the cases the flood would have opened, up to one day of
+        # budget, so it reacts to the real pressure; it never counts fewer than were delivered.
+        n_ctrl = n_rev if bulk is None else max(n_rev, min(n_rev - 1 + n_bulk, int(np.ceil(B))))
+        q_rev += eta * (n_ctrl - ref_rev - B * dt)
         if B_auto is not None:
             # false-automation budget: same controller as the review budget
             q_act += eta_act * (n_auto - ref_auto - B_auto * dt)

@@ -27,5 +27,5 @@ for pair in $PAIRS; do
             --database_host "$DB_HOST" --database_port "$DB_PORT" || continue
     fi
     python -m caliber.deploy_study --artifact_dir "$A" --system "$system" --dataset "$dataset" \
-        --detector "$DETECTOR" 2>&1 | grep -v "Warn\|read_csv\|nltk"
+        --detector "$DETECTOR" ${EXTRA:-} 2>&1 | grep -v "Warn\|read_csv\|nltk"
 done
