@@ -67,9 +67,9 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
     flood_cap: at most this many new individual cases per batch ("auto": one hour of budget,
     None: no cap). Alerting units of a batch open cases in descending score order; once the cap
     is reached, the batch's remaining new alerts join one bulk review case, so a single batch
-    delivers at most flood_cap + 1 cases to analysts. The controller still registers the
-    flood's size, up to B, so one batch moves the threshold by at most eta*B (the N of
-    Proposition 1 becomes B). Bulk cases are never automated.
+    delivers at most flood_cap + 1 cases to analysts. After a flood the threshold rises just
+    above the batch's highest overflowing score, by at most eta*B (one day of budget), so it
+    reacts to the pressure without over-correcting. Bulk cases are never automated.
     refund_delay_ns: an analyst's verdict arrives this long after a case opens; a case that is
     malicious by then (any of its units so far) is refunded at that time, never earlier.
     act_key / act_seen: novelty gate for the act tier. A case may be automated only if the
@@ -103,6 +103,8 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
                     bulk = len(cases) - 1
                     n_rev += 1
                     pending.append((t[i] + refund_delay_ns, bulk))
+                if n_bulk == 0:
+                    s_bulk = S[i]              # highest score that overflowed the cap
                 n_bulk += 1                    # cases the flood would have opened
                 c = open_case[kh] = bulk
             if act_key is not None:
@@ -137,11 +139,16 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
                         ref_rev += int(cases[c]["audited"])
                     else:
                         ref_rev += 1
-        # review budget (tier B + audits). Analysts receive one bulk case per flooded batch, but
-        # the controller registers the cases the flood would have opened, up to one day of
-        # budget, so it reacts to the real pressure; it never counts fewer than were delivered.
-        n_ctrl = n_rev if bulk is None else max(n_rev, min(n_rev - 1 + n_bulk, int(np.ceil(B))))
-        q_rev += eta * (n_ctrl - ref_rev - B * dt)
+        # review budget (tier B + audits), counting the cases actually delivered
+        q_prev = q_rev
+        q_rev += eta * (n_rev - ref_rev - B * dt)
+        if bulk is not None:
+            # flood: raise the threshold just enough that this batch would have stayed within the
+            # cap (above its highest overflowing score), by at most one day of budget (eta*B).
+            # The step only ever raises q relative to the plain update, so Proposition 1 holds
+            # with N = cap + 1, and a flood far above the threshold cannot blind it for longer
+            # than about a day.
+            q_rev = max(q_rev, min(q_prev + eta * B, float(s_bulk) + 1e-9))
         if B_auto is not None:
             # false-automation budget: same controller as the review budget
             q_act += eta_act * (n_auto - ref_auto - B_auto * dt)
