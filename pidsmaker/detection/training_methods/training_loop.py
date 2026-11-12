@@ -272,6 +272,7 @@ def main(cfg):
 
         # Test
         if (epoch + 1) % 2 == 0 or epoch == 0:
+            fit_density(model, train_data, cfg, device)   # CALIBER: --density
             test_stats = inference_loop.main(
                 cfg=cfg,
                 model=model,
@@ -298,6 +299,7 @@ def main(cfg):
     # After training
     if best_epoch_mode:
         model.load_state_dict(best_model)
+        fit_density(model, train_data, cfg, device)       # CALIBER: --density
         test_stats = inference_loop.main(
             cfg=cfg,
             model=model,
@@ -327,6 +329,32 @@ def main(cfg):
     )
 
     return best_val_score
+
+
+@torch.no_grad()
+def fit_density(model, train_data, cfg, device):
+    """CALIBER --density: one frozen pass over the training graphs, so that each objective that
+    supports it can fit the density of its hidden features under the training events (used for
+    the novelty column at the following evaluation)."""
+    objs = [getattr(o, "objective", o) for o in model.objectives]
+    objs = [o for o in objs if getattr(o, "density", False)]
+    if not objs:
+        return
+    start = timer()
+    model.eval()
+    model.reset_state()
+    for o in objs:
+        o.density_begin()
+    for dataset in train_data:
+        for g in dataset:
+            g.to(device=device)
+            g = remove_attacks_if_needed(g, cfg)
+            model(g, inference=True)
+            g.to("cpu")
+    for o in objs:
+        o.density_end()
+    model.reset_state()
+    log(f"[density] fitted on the training events in {timer() - start:.1f}s")
 
 
 def remove_attacks_if_needed(graph, cfg):

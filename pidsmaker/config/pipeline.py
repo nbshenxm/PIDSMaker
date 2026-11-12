@@ -80,6 +80,9 @@ def get_default_cfg(args):
     # CALIBER: train the edge-type decoder with an abstain output (gambler's loss, JSON spec
     # {"o": payoff}). Enters the training hash only when set.
     cfg._abstain = getattr(args, "abstain", "") or ""
+    # CALIBER: training-feature density (novelty) column at inference, see
+    # EdgeTypePrediction.density_begin. Enters the training hash only when set.
+    cfg._density = bool(getattr(args, "density", False))
 
     cfg._restart_from_scratch = args.restart_from_scratch
     if cfg._restart_from_scratch:
@@ -217,6 +220,9 @@ def get_runtime_required_args(return_unknown_args=False, args=None):
                         help="CALIBER: JSON spec of gated online updates during test inference")
     parser.add_argument('--abstain', default="",
                         help="CALIBER: JSON spec of an abstention-trained edge-type decoder")
+    parser.add_argument('--density', action="store_true",
+                        help="CALIBER: write a novelty column (density of the decoder's hidden "
+                             "features under the training events)")
     parser.add_argument(
         "--holdout_train_day", default="",
         help="CALIBER leave-one-day-out: move this training date into the validation split.",
@@ -351,6 +357,8 @@ def set_task_paths(cfg, subtask_concat_value=None):
             restart_values += ["online=" + cfg._online.replace(" ", "")]
         if task == "training" and getattr(cfg, "_abstain", ""):  # CALIBER: abstention-trained decoder
             restart_values += ["abstain=" + cfg._abstain.replace(" ", "")]
+        if task == "training" and getattr(cfg, "_density", False):  # CALIBER: novelty column
+            restart_values += ["density=1"]
         if subtask_concat_value is not None:
             if task == subtask_concat_value["subtask"]:
                 restart_values += [subtask_concat_value["concat_value"]]

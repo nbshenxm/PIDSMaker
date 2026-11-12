@@ -796,6 +796,7 @@ def objective_factory(cfg, in_dim, graph_reindexer, device, objective_cfg=None, 
                     edge_type_dim=num_edge_types,
                     multi_edge=multi_edge,
                     abstain=abstain,
+                    density=bool(getattr(cfg, "_density", False)),
                 )
             )
 

@@ -6,9 +6,23 @@ from pidsmaker.utils.utils import compute_class_weights
 
 
 class EdgeTypePrediction(nn.Module):
-    def __init__(self, decoder, loss_fn, balanced_loss, edge_type_dim, multi_edge, abstain=None):
+    def __init__(self, decoder, loss_fn, balanced_loss, edge_type_dim, multi_edge, abstain=None,
+                 density=False):
         super(EdgeTypePrediction, self).__init__()
         self.decoder = decoder
+        # CALIBER: novelty = how unlike the TRAINING events an event's representation is.
+        # A frozen pass over the training graphs before each evaluation fits a Gaussian per edge
+        # type with a shared covariance on the decoder's hidden features (the input of its output
+        # layer); at inference, novelty = -log density under that mixture (Lee et al., NeurIPS'18;
+        # Mukhoti et al., CVPR'23). The abstain output says what is inherently unpredictable in
+        # the training data (routine noise); novelty says what lies outside it.
+        self.density = density
+        self._collect = False
+        self._dens = None
+        self._acc = None
+        self._z = None
+        if density:
+            self._out_layer().register_forward_hook(self._grab)
         self.loss_fn = loss_fn
         self.balanced_loss = balanced_loss
         self.edge_type_dim = edge_type_dim
@@ -29,6 +43,66 @@ class EdgeTypePrediction(nn.Module):
             self.register_buffer("log_o", torch.tensor(float(np.log(o0))))
         else:
             self.log_o = None
+
+    # ------------------------------------------------------------------ CALIBER: novelty density
+    def _out_layer(self):
+        d = self.decoder
+        seq = getattr(getattr(d, "mlp", None), "mlp", None)
+        if isinstance(seq, nn.Sequential) and isinstance(seq[-1], nn.Linear):
+            return seq[-1]
+        if isinstance(getattr(d, "lin_final", None), nn.Linear):
+            return d.lin_final
+        raise ValueError(f"--density: no output layer found in {type(d).__name__}")
+
+    def _grab(self, module, inputs, output):
+        self._z = inputs[0] if (self._collect or self._dens is not None) else None
+
+    def density_begin(self):
+        self._collect, self._dens, self._acc = True, None, None
+
+    @torch.no_grad()
+    def _accumulate(self, z, y):
+        z = z.detach().double()
+        K, D = self.edge_type_dim, z.shape[1]
+        if self._acc is None:
+            self._acc = {"n": torch.zeros(K, dtype=torch.float64, device=z.device),
+                         "s": torch.zeros(K, D, dtype=torch.float64, device=z.device),
+                         "S": torch.zeros(D, D, dtype=torch.float64, device=z.device)}
+        a = self._acc
+        a["n"].index_add_(0, y, torch.ones_like(y, dtype=torch.float64))
+        a["s"].index_add_(0, y, z)
+        a["S"] += z.T @ z
+
+    @torch.no_grad()
+    def density_end(self):
+        self._collect = False
+        a, self._acc = self._acc, None
+        if a is None:
+            return
+        present = a["n"] > 0
+        n, s = a["n"][present], a["s"][present]
+        N, D = float(n.sum()), s.shape[1]
+        mu = s / n[:, None]
+        cov = (a["S"] - (mu.T * n) @ mu) / N                       # shared within-type covariance
+        cov = cov + (1e-3 * cov.diagonal().mean() + 1e-8) * torch.eye(D, dtype=cov.dtype, device=cov.device)
+        L = torch.linalg.cholesky(cov)
+        A = torch.linalg.solve_triangular(L, torch.eye(D, dtype=cov.dtype, device=cov.device), upper=False)
+        cls = torch.nonzero(present).squeeze(1)
+        idx = torch.full((self.edge_type_dim,), -1, dtype=torch.long, device=cov.device)
+        idx[cls] = torch.arange(len(cls), device=cov.device)
+        self._dens = {"A": A, "mut": mu @ A.T, "logpi": torch.log(n / N), "idx": idx,
+                      "const": 0.5 * D * float(np.log(2 * np.pi)) + float(torch.log(L.diagonal()).sum())}
+
+    @torch.no_grad()
+    def _novelty(self, z, y):
+        d = self._dens
+        zt = z.detach().double() @ d["A"].T
+        m2 = torch.cdist(zt, d["mut"]) ** 2                          # squared Mahalanobis per type
+        logp = torch.logsumexp(d["logpi"] - 0.5 * m2, dim=1) - d["const"]
+        j = d["idx"][y]
+        m2_y = torch.where(j >= 0, m2.gather(1, j.clamp(min=0)[:, None]).squeeze(1),
+                           m2.min(1).values)
+        return (-logp).float(), (0.5 * m2_y).float()
 
     def _abstain_forward(self, h, y, inference, class_weights):
         o = float(self.abstain.get("o", 2.0))
@@ -80,6 +154,14 @@ class EdgeTypePrediction(nn.Module):
         if not self.multi_edge:
             edge_type = edge_type.argmax(dim=1)
 
+        nov = None
+        if self.density and self._z is not None and not self.multi_edge:
+            if self._collect:
+                self._accumulate(self._z, edge_type)
+            elif inference and self._dens is not None:
+                nov = self._novelty(self._z, edge_type)
+            self._z = None
+
         if self.abstain and not self.multi_edge:
             loss, logp, lp_m, log_keep = self._abstain_forward(h, edge_type, inference, class_weights)
             out = {"loss": loss}
@@ -88,6 +170,8 @@ class EdgeTypePrediction(nn.Module):
                     lq = torch.log_softmax(h[:, :-1], dim=-1)   # over the real types only
                     out["entropy"] = -(lq.exp() * lq).sum(-1)
                     out["abstain"] = lp_m.exp()
+                if nov is not None:
+                    out["novelty"], out["novelty_y"] = nov
             return out
 
         loss = self.loss_fn(h, edge_type, inference=inference, class_weights=class_weights)
@@ -103,4 +187,6 @@ class EdgeTypePrediction(nn.Module):
                     logp = torch.log_softmax(h, dim=-1)
                     ent = -(logp.exp() * logp).sum(-1)
             out["entropy"] = ent
+            if nov is not None:
+                out["novelty"], out["novelty_y"] = nov
         return out
