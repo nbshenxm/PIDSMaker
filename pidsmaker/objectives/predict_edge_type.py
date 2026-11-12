@@ -25,15 +25,22 @@ class EdgeTypePrediction(nn.Module):
         logp = torch.log_softmax(h, dim=-1)                 # K real types + abstain
         lp_y = logp.gather(1, y[:, None]).squeeze(1)
         lp_m = logp[:, -1]
+        # distribution over the real edge types alone (abstain removed), computed stably
+        lq_y = torch.log_softmax(h[:, :-1], dim=-1).gather(1, y[:, None]).squeeze(1)
         log_keep = torch.log1p(-lp_m.exp().clamp(max=1 - 1e-6))
         if inference:
             # anomaly score = surprise among the real edge types, abstain mass removed
-            return -(lp_y - log_keep), logp, lp_m, log_keep
+            return -lq_y, logp, lp_m, log_keep
         self._train_steps += 1
         if self._train_steps <= int(self.abstain.get("warm", 0)):
-            per = -(lp_y - log_keep)
+            per = -lq_y
         else:
             per = -torch.logaddexp(lp_y, lp_m - torch.log(torch.tensor(o, device=h.device)))
+            # "ce": keep the real-type distribution trained where the model abstains, so its
+            # surprise stays meaningful there (otherwise the real logits drift freely)
+            ce = float(self.abstain.get("ce", 0.0))
+            if ce > 0:
+                per = per + ce * (-lq_y)
         if class_weights is not None:
             w = class_weights[y]
             return (per * w).sum() / w.sum(), logp, lp_m, log_keep
@@ -56,7 +63,7 @@ class EdgeTypePrediction(nn.Module):
             out = {"loss": loss}
             if inference:
                 with torch.no_grad():
-                    lq = logp[:, :-1] - log_keep[:, None]   # renormalized over the real types
+                    lq = torch.log_softmax(h[:, :-1], dim=-1)   # over the real types only
                     out["entropy"] = -(lq.exp() * lq).sum(-1)
                     out["abstain"] = lp_m.exp()
             return out
