@@ -37,6 +37,8 @@ from caliber.online import day_of, ensemble_stream
 # ETA_DAY validation standard deviations, whatever B is. A fixed per-case step makes the
 # controller sluggish at small budgets and jumpy at large ones; Proposition 1 holds for any step.
 ETA_DAY = 2.0
+# review on the ensemble upper bound U = S + KAPPA * sem (one-sided 95%)
+KAPPA = 1.645
 
 
 def review_step(cal, B):
@@ -428,7 +430,8 @@ def main():
                     S, st["t1"], st["w"], st["y"], lin, B, q0, 0.0 if static else review_step(cal, B),
                     2.0, audit if b_auto is not None else 0.0,
                     (eta_a or 0.02) * sd, q_act0 if b_auto is not None else np.inf, rng,
-                    B_auto=b_auto, S_act=S_act, flood_cap=None if static else "auto",
+                    B_auto=b_auto, S_act=S_act, flood_cap=None,
+                    bucket_h=None if static else BUCKET_H,
                     act_key=exe_key if "_novel" in base else None,
                     act_seen=seen_val if "_novel" in base else None)
                 r = evaluate(st, case_of, cases, B, tz, labels.get("attacks"))

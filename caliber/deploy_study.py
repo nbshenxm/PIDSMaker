@@ -28,7 +28,7 @@ from caliber import data
 from caliber.budget import DAY, HOUR
 from caliber.lineage import case_keys
 from caliber.online import day_of, ensemble_stream
-from caliber.tiers import (BUCKET_H, _with_borrower, case_threshold, replay_tiers, review_step,
+from caliber.tiers import (BUCKET_H, KAPPA, _with_borrower, case_threshold, replay_tiers, review_step,
                            unit_attacks)
 
 BUDGETS = [20, 50, 100, 200, 500]
@@ -172,11 +172,15 @@ def allowlist_scores(nodes, times, artifact_dir, dataset, meta):
 
 
 def one_deployment(S, S_val, st, keys, B, nvd, policy, attacks, tz, cand=None,
-                   verdict_delay_ns=8 * HOUR, max_gap_ns=HOUR, keys_val=None, bucket_h=BUCKET_H):
+                   verdict_delay_ns=8 * HOUR, max_gap_ns=HOUR, keys_val=None, bucket_h=BUCKET_H,
+                   U=None, U_val=None):
     """policy: static | prevday | daytopB | hourtopB | hindsight | caliber (token bucket) |
     caliber_cap (earlier per-batch flood cap) | caliber_nocap (controller only).
     Every policy starts from the validation threshold that would have opened B cases per day
-    (keys_val: case keys of the validation units)."""
+    (keys_val: case keys of the validation units). CALIBER policies review on the ensemble upper
+    bound U (= S for a single run); the baselines use the detector score S, as deployed today."""
+    if policy.startswith("caliber") and U is not None:
+        S, S_val = U, U_val
     cal = S_val[np.isfinite(S_val)]
     q0 = case_threshold(S_val, st["t_val"], st["node_val"] if keys_val is None else keys_val, B, nvd)
     n_flood = 0
@@ -316,13 +320,18 @@ def main():
         for kind, subset in configs:
             S = np.nanmean(Z[subset], 0)
             S_val = np.nanmean(Zv[subset], 0)
+            if len(subset) > 1:                     # review statistic: upper bound over runs
+                U = S + KAPPA * np.nan_to_num(np.nanstd(Z[subset], 0) / np.sqrt(len(subset)))
+                U_val = S_val + KAPPA * np.nan_to_num(np.nanstd(Zv[subset], 0) / np.sqrt(len(subset)))
+            else:
+                U, U_val = S, S_val
             key = tuple(subset)
             if key not in cand_cache:
                 cand_cache[key] = candidate_cases(S, st, keys, labels["attacks"], tz)
             for policy in args.policies.split(","):
                 r = one_deployment(S, S_val, st, keys, B, nvd, policy, labels["attacks"], tz,
                                    cand_cache[key], max_gap_ns=int(args.gap_cap_h * HOUR),
-                                   keys_val=keys_val, bucket_h=args.bucket_h)
+                                   keys_val=keys_val, bucket_h=args.bucket_h, U=U, U_val=U_val)
                 rows.append({"B": B, "runs": kind, "members": subset, "policy": policy, **r})
         print(f"B={B} done", flush=True)
     rep = os.path.join(args.artifact_dir, "caliber", "reports")
