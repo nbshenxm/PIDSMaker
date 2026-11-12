@@ -56,15 +56,22 @@ class OnlineUpdater:
         self.n_held += int((~keep).sum())
         if keep.sum() < self.min_edges:
             return
-        sub = g.clone()[torch.from_numpy(keep).to(g.edge_index.device)]
+        # Per-edge losses on the whole window (slicing a reindexed batch by edges also slices its
+        # node tensors), with gradients on; average only over the confidently benign edges.
+        mask = torch.from_numpy(keep).to(g.edge_index.device)
         self.model.train()
-        for _ in range(self.steps):
-            self.opt.zero_grad()
-            loss = self.model(sub)["loss"]
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-            self.opt.step()
-        self.model.eval()
+        self.model._force_grad = True
+        try:
+            for _ in range(self.steps):
+                self.opt.zero_grad()
+                per_edge = self.model(g, inference=True)["loss"]
+                loss = per_edge[mask].mean()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+                self.opt.step()
+        finally:
+            self.model._force_grad = False
+            self.model.eval()
         self.n_upd += 1
         self.n_edges += int(keep.sum())
 

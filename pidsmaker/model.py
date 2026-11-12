@@ -68,7 +68,7 @@ class Model(nn.Module):
         """
         train_mode = not inference
         edge_index = batch.edge_index
-        with torch.set_grad_enabled(train_mode):
+        with torch.set_grad_enabled(train_mode or getattr(self, "_force_grad", False)):
             res = self.encoder(
                 edge_index=edge_index,
                 t=batch.t,
@@ -113,7 +113,7 @@ class Model(nn.Module):
                     x_for_encoding, mask_nodes = actual_objective.mask_input(x_for_encoding)
                     break  # Only mask once
 
-        with torch.set_grad_enabled(train_mode):
+        with torch.set_grad_enabled(train_mode or getattr(self, "_force_grad", False)):
             # Pass masked input to encoder if masking was applied
             if mask_nodes is not None and hasattr(batch, "x") and x_for_encoding is not None:
                 # Temporarily replace batch.x with masked version
@@ -142,7 +142,7 @@ class Model(nn.Module):
         h, h_src, h_dst, mask_nodes = self._embed_nodes(batch, inference)
         train_mode = not inference
 
-        with torch.set_grad_enabled(train_mode):
+        with torch.set_grad_enabled(train_mode or getattr(self, "_force_grad", False)):
             if self.fuse_duplicate_edges_training:
                 if not (inference or validation):
                     edge_index = batch.edge_index  # Shape: [2, num_edges]
