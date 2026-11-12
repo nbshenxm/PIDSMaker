@@ -78,7 +78,8 @@ def main(cfg):
         all_data=(val_data, test_data),
     )
     if cfg._from_weights:
-        model.load_state_dict(torch.load(os.path.join(cfg._from_weights_path, "state_dict.pkl")))
+        model.load_state_dict(torch.load(os.path.join(cfg._from_weights_path, "state_dict.pkl"),
+                                         map_location=device))
     optimizer = optimizer_factory(cfg, parameters=set(model.parameters()))
     stable_optim = cfg.training.stable_optim
 
