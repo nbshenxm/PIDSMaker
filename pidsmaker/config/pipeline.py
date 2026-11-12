@@ -77,6 +77,9 @@ def get_default_cfg(args):
     # CALIBER: online (test-then-train) updates during test inference (JSON spec, see
     # inference_loop.OnlineUpdater). Enters the training hash only when set.
     cfg._online = getattr(args, "online", "") or ""
+    # CALIBER: train the edge-type decoder with an abstain output (gambler's loss, JSON spec
+    # {"o": payoff}). Enters the training hash only when set.
+    cfg._abstain = getattr(args, "abstain", "") or ""
 
     cfg._restart_from_scratch = args.restart_from_scratch
     if cfg._restart_from_scratch:
@@ -212,6 +215,8 @@ def get_runtime_required_args(return_unknown_args=False, args=None):
                         help="CALIBER: JSON spec of a test-time adversarial transform")
     parser.add_argument('--online', default="",
                         help="CALIBER: JSON spec of gated online updates during test inference")
+    parser.add_argument('--abstain', default="",
+                        help="CALIBER: JSON spec of an abstention-trained edge-type decoder")
     parser.add_argument(
         "--holdout_train_day", default="",
         help="CALIBER leave-one-day-out: move this training date into the validation split.",
@@ -338,12 +343,14 @@ def set_task_paths(cfg, subtask_concat_value=None):
             restart_values += cfg.dataset.train_dates
             if getattr(cfg, "_adversary", ""):  # CALIBER: only when an adversary is set
                 restart_values += ["adversary=" + cfg._adversary.replace(" ", "")]
-        if task == "training" and getattr(cfg, "_online", ""):   # CALIBER: online test-time updates
-            restart_values += ["online=" + cfg._online.replace(" ", "")]
             if (
                 cfg._restart_from_scratch
             ):  # to start from a brand new folder, we generate a random id to add to the hash
                 restart_values += [cfg._run_random_seed]
+        if task == "training" and getattr(cfg, "_online", ""):   # CALIBER: online test-time updates
+            restart_values += ["online=" + cfg._online.replace(" ", "")]
+        if task == "training" and getattr(cfg, "_abstain", ""):  # CALIBER: abstention-trained decoder
+            restart_values += ["abstain=" + cfg._abstain.replace(" ", "")]
         if subtask_concat_value is not None:
             if task == subtask_concat_value["subtask"]:
                 restart_values += [subtask_concat_value["concat_value"]]

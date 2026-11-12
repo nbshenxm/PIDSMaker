@@ -770,7 +770,15 @@ def objective_factory(cfg, in_dim, graph_reindexer, device, objective_cfg=None, 
             
             num_edge_types = get_num_edge_type(cfg)
             decoder_out_dim = node_out_dim if loss =="AMS" else num_edge_types
-            
+            # CALIBER: abstention-trained decoder (one extra "abstain" output)
+            abstain = None
+            if getattr(cfg, "_abstain", ""):
+                import json
+                abstain = json.loads(cfg._abstain)
+                if loss != "cross_entropy":
+                    raise ValueError("--abstain needs predict_edge_type.loss = cross_entropy")
+                decoder_out_dim = num_edge_types + 1
+
             multi_edge = False
             loss_fn = categorical_loss_fn_factory("BCE") if multi_edge else \
                 special_categorical_loss_fn_factory(
@@ -787,6 +795,7 @@ def objective_factory(cfg, in_dim, graph_reindexer, device, objective_cfg=None, 
                     balanced_loss=balanced_loss,
                     edge_type_dim=num_edge_types,
                     multi_edge=multi_edge,
+                    abstain=abstain,
                 )
             )
 

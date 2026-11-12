@@ -137,6 +137,8 @@ def test_edge_level(
     )
     if "entropy" in results and results["entropy"].numel() == len(edge_df):
         edge_df["entropy"] = results["entropy"].cpu().numpy().astype(np.float32)   # CALIBER
+    if "abstain" in results and results["abstain"].numel() == len(edge_df):
+        edge_df["abstain"] = results["abstain"].cpu().numpy().astype(np.float32)   # CALIBER
 
     # Here is a checkpoint, which records all edge losses in the current time window
     time_interval = (
