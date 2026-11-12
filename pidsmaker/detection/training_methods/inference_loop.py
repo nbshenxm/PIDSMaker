@@ -38,6 +38,12 @@ class OnlineUpdater:
         self.lr = float(spec.get("lr", 1e-5))
         self.steps = int(spec.get("steps", 1))
         self.min_edges = int(spec.get("min_edges", 32))
+        # anchor: L2 pull toward the trained weights (L2-SP), the standard guard against drift and
+        # forgetting in continual / test-time adaptation; every: update on every n-th window only
+        self.anchor = float(spec.get("anchor", 0.0))
+        self.every = max(1, int(spec.get("every", 1)))
+        self.n_seen = 0
+        self.theta0 = [p.detach().clone() for p in model.parameters()] if self.anchor > 0 else None
         q = float(spec.get("gate", 0.9))
         self.tau = float(np.quantile(np.asarray(val_losses, float), q)) if len(val_losses) else np.inf
         self.model = model
@@ -51,6 +57,9 @@ class OnlineUpdater:
 
     def update(self, g, losses):
         if self.opt is None:
+            return
+        self.n_seen += 1
+        if self.n_seen % self.every:
             return
         keep = np.asarray(losses, float) < self.tau
         self.n_held += int((~keep).sum())
@@ -66,6 +75,9 @@ class OnlineUpdater:
                 self.opt.zero_grad()
                 per_edge = self.model(g, inference=True)["loss"]
                 loss = per_edge[mask].mean()
+                if self.theta0 is not None:
+                    loss = loss + self.anchor * sum(((p - p0) ** 2).sum()
+                                                    for p, p0 in zip(self.model.parameters(), self.theta0))
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
                 self.opt.step()
