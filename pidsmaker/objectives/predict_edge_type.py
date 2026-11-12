@@ -1,3 +1,4 @@
+import torch
 import torch.nn as nn
 
 from pidsmaker.utils.utils import compute_class_weights
@@ -25,4 +26,16 @@ class EdgeTypePrediction(nn.Module):
             edge_type = edge_type.argmax(dim=1)
         
         loss = self.loss_fn(h, edge_type, inference=inference, class_weights=class_weights)
-        return {"loss": loss}
+        out = {"loss": loss}
+        if inference:
+            # CALIBER: entropy of the predicted edge-type distribution = the surprise the model
+            # expects for this event (irreducible, aleatoric part); loss - entropy is the excess.
+            with torch.no_grad():
+                if self.multi_edge:
+                    p = torch.sigmoid(h).clamp(1e-7, 1 - 1e-7)
+                    ent = -(p * p.log() + (1 - p) * (1 - p).log()).sum(-1)
+                else:
+                    logp = torch.log_softmax(h, dim=-1)
+                    ent = -(logp.exp() * logp).sum(-1)
+            out["entropy"] = ent
+        return out

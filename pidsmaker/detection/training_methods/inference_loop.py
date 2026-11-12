@@ -19,6 +19,60 @@ from pidsmaker.utils.utils import (
 )
 
 
+class OnlineUpdater:
+    """CALIBER: gated online learning during test inference (test-then-train).
+
+    Each test window is first scored (and its losses written) by the current model; only then
+    does the model take `steps` optimizer steps on the window's edges that are confidently benign,
+    i.e. whose loss is below the `gate` quantile of this model's own benign validation losses.
+    Edges above the gate (possible attacks, or simply unfamiliar) are never trained on, so the
+    detector adapts to benign drift without learning what it is unsure about.
+    spec (JSON): {"lr": 1e-5, "gate": 0.9, "steps": 1, "min_edges": 32}; lr = 0 only records."""
+
+    def __init__(self, cfg, model, val_losses, device):
+        import json
+        if not cfg._from_weights:
+            # updating during training-time evaluation would leak into later training epochs
+            raise ValueError("--online requires --from_weights (frozen members scored test-then-train)")
+        spec = json.loads(cfg._online)
+        self.lr = float(spec.get("lr", 1e-5))
+        self.steps = int(spec.get("steps", 1))
+        self.min_edges = int(spec.get("min_edges", 32))
+        q = float(spec.get("gate", 0.9))
+        self.tau = float(np.quantile(np.asarray(val_losses, float), q)) if len(val_losses) else np.inf
+        self.model = model
+        self.device = device
+        self.opt = torch.optim.Adam(model.parameters(), lr=self.lr) if self.lr > 0 else None
+        self.n_upd = self.n_edges = self.n_held = 0
+        enc = getattr(model, "encoder", None)
+        if self.opt is not None and enc is not None and "TGN" in type(enc).__name__:
+            raise NotImplementedError("online updates on TGN encoders need a memory snapshot")
+        log(f"[online] lr={self.lr} gate q={q} -> loss < {self.tau:.4f}, steps={self.steps}")
+
+    def update(self, g, losses):
+        if self.opt is None:
+            return
+        keep = np.asarray(losses, float) < self.tau
+        self.n_held += int((~keep).sum())
+        if keep.sum() < self.min_edges:
+            return
+        sub = g.clone()[torch.from_numpy(keep).to(g.edge_index.device)]
+        self.model.train()
+        for _ in range(self.steps):
+            self.opt.zero_grad()
+            loss = self.model(sub)["loss"]
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+            self.opt.step()
+        self.model.eval()
+        self.n_upd += 1
+        self.n_edges += int(keep.sum())
+
+    def summary(self):
+        log(f"[online] {self.n_upd} updates on {self.n_edges} benign-gated edges; "
+            f"{self.n_held} edges held out (above the gate)")
+
+
 @torch.no_grad()
 def test_edge_level(
     data,
@@ -62,6 +116,8 @@ def test_edge_level(
             "edge_type": edge_types.astype(int),
         }
     )
+    if "entropy" in results and results["entropy"].numel() == len(edge_df):
+        edge_df["entropy"] = results["entropy"].cpu().numpy().astype(np.float32)   # CALIBER
 
     # Here is a checkpoint, which records all edge losses in the current time window
     time_interval = (
@@ -303,10 +359,15 @@ def main(cfg, model, val_data, test_data, epoch, split, logging=True, train_data
     tpb = []
     split2loss = {}
 
+    split_losses = {}
     for dataset, split_name in splits:
         desc = "Validation" if split_name == "val" else "Testing"
 
         tracemalloc.start()
+
+        online = None
+        if split_name == "test" and getattr(cfg, "_online", "") and "val" in split_losses:
+            online = OnlineUpdater(cfg, model, split_losses["val"], device)
 
         all_losses = []
         for graphs in dataset:
@@ -325,6 +386,8 @@ def main(cfg, model, val_data, test_data, epoch, split, logging=True, train_data
                 )
                 all_losses.extend(losses)
                 tpb.append(time.time() - s)
+                if online is not None:                 # test first, then train
+                    online.update(g, losses)
 
                 g.to("cpu")  # Move graph back to CPU to free GPU memory for next batch
                 if use_cuda:
@@ -339,6 +402,9 @@ def main(cfg, model, val_data, test_data, epoch, split, logging=True, train_data
             peak_inference_gpu_mem = max(peak_inference_gpu_mem, peak_inference_gpu_memory)
             torch.cuda.reset_peak_memory_stats(device=device)
 
+        if online is not None:
+            online.summary()
+        split_losses[split_name] = all_losses
         mean_loss = np.mean(all_losses)
         split2loss[split_name] = mean_loss
 

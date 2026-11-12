@@ -74,6 +74,9 @@ def get_default_cfg(args):
     # CALIBER: realizable test-time adversarial transform (JSON spec, see caliber_adversary.py).
     # Enters the construction hash only when set, so default artifacts are unaffected.
     cfg._adversary = getattr(args, "adversary", "") or ""
+    # CALIBER: online (test-then-train) updates during test inference (JSON spec, see
+    # inference_loop.OnlineUpdater). Enters the training hash only when set.
+    cfg._online = getattr(args, "online", "") or ""
 
     cfg._restart_from_scratch = args.restart_from_scratch
     if cfg._restart_from_scratch:
@@ -207,6 +210,8 @@ def get_runtime_required_args(return_unknown_args=False, args=None):
                         help="CALIBER: folder with state_dict.pkl and word2vec.model for --from_weights")
     parser.add_argument('--adversary', default="",
                         help="CALIBER: JSON spec of a test-time adversarial transform")
+    parser.add_argument('--online', default="",
+                        help="CALIBER: JSON spec of gated online updates during test inference")
     parser.add_argument(
         "--holdout_train_day", default="",
         help="CALIBER leave-one-day-out: move this training date into the validation split.",
@@ -333,6 +338,8 @@ def set_task_paths(cfg, subtask_concat_value=None):
             restart_values += cfg.dataset.train_dates
             if getattr(cfg, "_adversary", ""):  # CALIBER: only when an adversary is set
                 restart_values += ["adversary=" + cfg._adversary.replace(" ", "")]
+        if task == "training" and getattr(cfg, "_online", ""):   # CALIBER: online test-time updates
+            restart_values += ["online=" + cfg._online.replace(" ", "")]
             if (
                 cfg._restart_from_scratch
             ):  # to start from a brand new folder, we generate a random id to add to the hash
