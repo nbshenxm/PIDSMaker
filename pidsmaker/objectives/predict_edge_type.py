@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -19,9 +20,20 @@ class EdgeTypePrediction(nn.Module):
         # plain cross-entropy training steps first}.
         self.abstain = abstain
         self._train_steps = 0
+        # "cov": target coverage (share of training events the model predicts rather than
+        # abstains on). The payoff o is then adapted by integral control during training,
+        # log o <- log o + k (abstain rate - (1 - cov)), clipped to (1, K], so that every dataset
+        # abstains on the same share of events instead of whatever a fixed o produces.
+        if abstain and "cov" in abstain:
+            o0 = float(abstain.get("o", max(2.0, edge_type_dim / 2.0)))
+            self.register_buffer("log_o", torch.tensor(float(np.log(o0))))
+        else:
+            self.log_o = None
 
     def _abstain_forward(self, h, y, inference, class_weights):
         o = float(self.abstain.get("o", 2.0))
+        if self.log_o is not None:
+            o = float(self.log_o.exp())
         logp = torch.log_softmax(h, dim=-1)                 # K real types + abstain
         lp_y = logp.gather(1, y[:, None]).squeeze(1)
         lp_m = logp[:, -1]
@@ -32,6 +44,16 @@ class EdgeTypePrediction(nn.Module):
             # anomaly score = surprise among the real edge types, abstain mass removed
             return -lq_y, logp, lp_m, log_keep
         self._train_steps += 1
+        if self.log_o is not None:
+            with torch.no_grad():
+                rate = (lp_m.exp() > 0.5).float().mean()
+                target = 1.0 - float(self.abstain["cov"])
+                k = float(self.abstain.get("k", 0.05))
+                self.log_o.add_(k * (rate - target)).clamp_(
+                    float(np.log(1.05)), float(np.log(self.edge_type_dim)))
+                if self._train_steps % 500 == 1:
+                    print(f"[abstain] step {self._train_steps}: rate {float(rate):.3f} "
+                          f"target {target:.3f} o {float(self.log_o.exp()):.2f}", flush=True)
         if self._train_steps <= int(self.abstain.get("warm", 0)):
             per = -lq_y
         else:
