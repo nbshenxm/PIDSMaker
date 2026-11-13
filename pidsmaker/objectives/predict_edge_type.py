@@ -32,8 +32,14 @@ class EdgeTypePrediction(nn.Module):
         # model learns to abstain on events whose type it cannot predict better than 1/o instead
         # of spreading probability over them. abstain = {"o": payoff in (1, K], "warm": number of
         # plain cross-entropy training steps first}.
+        # "warm": "auto" -- plain cross-entropy until the running training loss falls below log o,
+        # the loss of abstaining on every event. Before that point abstaining everywhere is the
+        # gambler's loss optimum, and a slowly learning model can lock into it (Liu et al. warm up
+        # with cross-entropy for the same reason); the switch is permanent.
         self.abstain = abstain
         self._train_steps = 0
+        self._warm_ema = None
+        self._engaged = not (abstain and abstain.get("warm") == "auto")
         # "cov": target coverage (share of training events the model predicts rather than
         # abstains on). The payoff o is then adapted by integral control during training,
         # log o <- log o + k (abstain rate - (1 - cov)), clipped to (1, K], so that every dataset
@@ -128,7 +134,16 @@ class EdgeTypePrediction(nn.Module):
                 if self._train_steps % 500 == 1:
                     print(f"[abstain] step {self._train_steps}: rate {float(rate):.3f} "
                           f"target {target:.3f} o {float(self.log_o.exp()):.2f}", flush=True)
-        if self._train_steps <= int(self.abstain.get("warm", 0)):
+        if not self._engaged:
+            with torch.no_grad():
+                m = float((-lq_y).mean())
+                self._warm_ema = m if self._warm_ema is None else 0.99 * self._warm_ema + 0.01 * m
+                if self._train_steps >= 100 and self._warm_ema < float(np.log(o)):
+                    self._engaged = True
+                    print(f"[abstain] engaged at training step {self._train_steps}: running CE "
+                          f"{self._warm_ema:.3f} < log o = {np.log(o):.3f}", flush=True)
+            per = -lq_y
+        elif self.abstain.get("warm") != "auto" and self._train_steps <= int(self.abstain.get("warm", 0)):
             per = -lq_y
         else:
             per = -torch.logaddexp(lp_y, lp_m - torch.log(torch.tensor(o, device=h.device)))

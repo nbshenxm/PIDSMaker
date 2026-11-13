@@ -37,11 +37,12 @@ from caliber import data
 from caliber.lineage import case_keys
 from caliber.pilot import normaliser, unit_labels, unit_table
 
-SNAP = 3
+SNAP = int(os.environ.get("CALIBER_SNAP", "3"))
+LAST = int(os.environ.get("CALIBER_LAST", "0"))   # > 0: only the last LAST saved snapshots of a run
 THR = 0.5
 LEVELS = (0.5, 0.75, 0.9, 0.95, 0.99)
 MIN_TYPE = 50
-SPEC_ABSTAIN = '{"o":3}'
+SPEC_ABSTAIN = os.environ.get("CALIBER_ABSTAIN_SPEC", '{"o":3}')
 BASE_GROUP = "da39a3ee5e"
 KAPPA = 1.645
 LAG_H = 24.0          # novelty history lag: one review day
@@ -79,8 +80,18 @@ def density_runs(artifact_dir, system, dataset):
     return out
 
 
-def snapshots(m, snap=SNAP):
-    return [e for e in sorted(set(m["val_epochs"]) & set(m["test_epochs"])) if e >= snap]
+def snapshots(m, snap=None):
+    snap = SNAP if snap is None else snap
+    eps = [e for e in sorted(set(m["val_epochs"]) & set(m["test_epochs"])) if e >= snap]
+    return eps[-LAST:] if LAST else eps
+
+
+def _variant():
+    """Cache-key suffix for non-default members or abstaining configuration."""
+    if (SNAP, LAST, SPEC_ABSTAIN) == (3, 0, '{"o":3}'):
+        return ""
+    import hashlib
+    return "_" + hashlib.md5(f"{SNAP}|{LAST}|{SPEC_ABSTAIN}".encode()).hexdigest()[:8]
 
 
 def _edge_stats(ms, split, with_abstain):
@@ -395,7 +406,7 @@ def scored_stream(kind, artifact_dir, system, dataset, labels, seeds=(0, 1, 2)):
     is cached under <artifact_dir>/caliber/cache (labels are re-applied on load)."""
     import pickle
     cdir = os.path.join(artifact_dir, "caliber", "cache")
-    cp = os.path.join(cdir, f"abstain_score_v3_{system}_{dataset}_s{'-'.join(map(str, seeds))}.pkl")
+    cp = os.path.join(cdir, f"abstain_score_v3_{system}_{dataset}_s{'-'.join(map(str, seeds))}{_variant()}.pkl")
     st = None
     if os.path.exists(cp):
         with open(cp, "rb") as fh:
