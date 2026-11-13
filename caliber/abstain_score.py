@@ -278,8 +278,8 @@ def stream(artifact_dir, system, dataset, labels, seeds=(0, 1, 2), base_group=BA
     Zv = np.vstack([p["r"][0] for p in per])
     Zt = np.vstack([p["r"][1] for p in per])
     R = len(per)
-    sem_v = Zv.std(0, ddof=1) / np.sqrt(R) if R > 1 else np.zeros(Zv.shape[1])
-    sem_t = Zt.std(0, ddof=1) / np.sqrt(R) if R > 1 else np.zeros(Zt.shape[1])
+    sem_v = Zv.std(0, ddof=0) / np.sqrt(R) if R > 1 else np.zeros(Zv.shape[1])
+    sem_t = Zt.std(0, ddof=0) / np.sqrt(R) if R > 1 else np.zeros(Zt.shape[1])
     y = unit_labels(ut, "entity_window", labels)
     if verbose:
         print(f"  consensus-abstained test edges {pooled['cons_share_test']:.3f}; units val {len(uv)} "
@@ -349,15 +349,15 @@ def as_plain(st):
     Zv = np.vstack([p["b"][0] for p in st["views_per_seed"]])
     Zt = np.vstack([p["b"][1] for p in st["views_per_seed"]])
     R = Zt.shape[0]
-    sem_v = Zv.std(0, ddof=1) / np.sqrt(R) if R > 1 else 0.0
-    sem_t = Zt.std(0, ddof=1) / np.sqrt(R) if R > 1 else 0.0
+    sem_v = Zv.std(0, ddof=0) / np.sqrt(R) if R > 1 else 0.0
+    sem_t = Zt.std(0, ddof=0) / np.sqrt(R) if R > 1 else 0.0
     out.update({"S": bt, "S_val": bv, "Z": Zt, "Z_val": Zv,
                 "U": bt + KAPPA * sem_t, "U_val": bv + KAPPA * sem_v})
     return out
 
 
 def scored_stream(kind, artifact_dir, system, dataset, labels, seeds=(0, 1, 2)):
-    """kind: 'abstain' (frozen scorer) or 'plain3' (b alone on the same units). The scored stream
+    """kind: "abstain"/"abstain_dual" (frozen scorer) or "plain3" (b alone on the same units). The scored stream
     is cached under <artifact_dir>/caliber/cache (labels are re-applied on load)."""
     import pickle
     cdir = os.path.join(artifact_dir, "caliber", "cache")
@@ -375,4 +375,23 @@ def scored_stream(kind, artifact_dir, system, dataset, labels, seeds=(0, 1, 2)):
         with open(cp + ".tmp", "wb") as fh:
             pickle.dump(st, fh, protocol=4)
         os.replace(cp + ".tmp", cp)
+    R = st["Z"].shape[0]                            # interval over runs (recomputed on load)
+    for sfx in ("", "_val"):
+        sem = st["Z" + sfx].std(0) / np.sqrt(R) if R > 1 else 0.0
+        st["U" + sfx] = st["S" + sfx] + KAPPA * sem
     return as_plain(st) if kind == "plain3" else st
+
+
+def dual_views(st):
+    """The two round-robin views (S = b + q + mlvmax, C = b + q) for the online form with one
+    controller per view: per view (S_test, S_val, U_test, U_val), U = view + KAPPA sd_seeds/sqrt(R)."""
+    out = []
+    for name in ("S3", "C"):
+        sv, stt = st["views"][name]
+        Zv = np.vstack([p[name][0] for p in st["views_per_seed"]])
+        Zt = np.vstack([p[name][1] for p in st["views_per_seed"]])
+        R = Zt.shape[0]
+        sem_v = Zv.std(0, ddof=0) / np.sqrt(R) if R > 1 else 0.0
+        sem_t = Zt.std(0, ddof=0) / np.sqrt(R) if R > 1 else 0.0
+        out.append((stt, sv, stt + KAPPA * sem_t, sv + KAPPA * sem_v))
+    return out

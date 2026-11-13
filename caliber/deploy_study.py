@@ -173,7 +173,7 @@ def allowlist_scores(nodes, times, artifact_dir, dataset, meta):
 
 def one_deployment(S, S_val, st, keys, B, nvd, policy, attacks, tz, cand=None,
                    verdict_delay_ns=8 * HOUR, max_gap_ns=HOUR, keys_val=None, bucket_h=BUCKET_H,
-                   U=None, U_val=None):
+                   U=None, U_val=None, views=None):
     """policy: static | prevday | daytopB | hourtopB | hindsight | caliber (token bucket) |
     caliber_cap (earlier per-batch flood cap) | caliber_nocap (controller only).
     Every policy starts from the validation threshold that would have opened B cases per day
@@ -193,9 +193,22 @@ def one_deployment(S, S_val, st, keys, B, nvd, policy, attacks, tz, cand=None,
             kw = {"bucket_h": bucket_h}
         else:                                       # static: as deployed today, no cap
             kw = {"flood_cap": "auto" if policy == "caliber_cap" else None}
-        case_of, cases = replay_tiers(S, st["t1"], st["w"], st["y"], keys, B, q0, eta, 2.0, 0.0,
-                                      0.0, np.inf, np.random.default_rng(0),
-                                      refund_delay_ns=verdict_delay_ns, max_gap_ns=max_gap_ns, **kw)
+        if views is not None and policy.startswith("caliber"):
+            # online round-robin: one controller per view, B/K each, analysts get the union
+            from caliber.multiview import replay_views
+            K = len(views)
+            kv = st["node_val"] if keys_val is None else keys_val
+            q0s = [case_threshold(Uv, st["t_val"], kv, B / K, nvd) for _, Uv in views]
+            etas = [review_step(Uv[np.isfinite(Uv)], B / K) for _, Uv in views]
+            case_of, cases = replay_views([Ut for Ut, _ in views], st["t1"], st["w"], st["y"],
+                                          keys, B, q0s, etas, np.random.default_rng(0),
+                                          refund_delay_ns=verdict_delay_ns, max_gap_ns=max_gap_ns,
+                                          **kw)
+        else:
+            case_of, cases = replay_tiers(S, st["t1"], st["w"], st["y"], keys, B, q0, eta, 2.0, 0.0,
+                                          0.0, np.inf, np.random.default_rng(0),
+                                          refund_delay_ns=verdict_delay_ns, max_gap_ns=max_gap_ns,
+                                          **kw)
         n_flood = sum(bool(c.get("flood")) for c in cases)
         open_t, score, case_att = cases_of(case_of, cases, S, st["t1"], st["node"], st["y"], attacks)
         summary = np.array([bool(c.get("flood")) for c in cases], bool)
@@ -284,7 +297,7 @@ def main():
     ap.add_argument("--tag", default="", help="suffix for the report file")
     ap.add_argument("--detector", default="model", choices=["model", "allowlist"],
                     help="allowlist: executable-novelty baseline on the same units (Guerra et al.)")
-    ap.add_argument("--scorer", default="ensemble", choices=["ensemble", "abstain", "plain3"],
+    ap.add_argument("--scorer", default="ensemble", choices=["ensemble", "abstain", "abstain_dual", "plain3"],
                     help="ensemble: robust-z mean of the group's runs (default); abstain: the "
                          "abstention-aware scorer (caliber.abstain_score) on density runs; plain3: "
                          "its plain-surprise channel alone on the same units and seeds")
@@ -299,7 +312,7 @@ def main():
         st = ensemble_stream(members, labels, cache_dir=cache)
     else:
         from caliber import abstain_score
-        st = abstain_score.scored_stream(args.scorer, args.artifact_dir, args.system, args.dataset,
+        st = abstain_score.scored_stream(args.scorer.replace("_dual", ""), args.artifact_dir, args.system, args.dataset,
                                          labels, seeds=tuple(int(s) for s in args.seeds.split(",")))
     tz = labels.get("timezone", "US/Eastern")
     keys, has_lin = case_keys(st, args.artifact_dir, args.dataset, meta)
@@ -339,13 +352,20 @@ def main():
                 U_val = S_val + KAPPA * np.nan_to_num(np.nanstd(Zv[subset], 0) / np.sqrt(len(subset)))
             else:
                 U, U_val = S, S_val
+            views = None
+            if args.scorer == "abstain_dual":       # one controller per round-robin view
+                if len(subset) == M and M > 1:
+                    views = [(Ut, Uv) for _, _, Ut, Uv in abstain_score.dual_views(st)]
+                else:
+                    p = st["views_per_seed"][subset[0]]
+                    views = [(p["S3"][1], p["S3"][0]), (p["C"][1], p["C"][0])]
             key = tuple(subset)
             if key not in cand_cache:
                 cand_cache[key] = candidate_cases(S, st, keys, labels["attacks"], tz)
             for policy in args.policies.split(","):
                 r = one_deployment(S, S_val, st, keys, B, nvd, policy, labels["attacks"], tz,
                                    cand_cache[key], max_gap_ns=int(args.gap_cap_h * HOUR),
-                                   keys_val=keys_val, bucket_h=args.bucket_h, U=U, U_val=U_val)
+                                   keys_val=keys_val, bucket_h=args.bucket_h, U=U, U_val=U_val, views=views)
                 rows.append({"B": B, "runs": kind, "members": subset, "policy": policy, **r})
         print(f"B={B} done", flush=True)
     rep = os.path.join(args.artifact_dir, "caliber", "reports")
