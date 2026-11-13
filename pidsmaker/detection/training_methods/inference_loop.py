@@ -345,6 +345,9 @@ def test_node_level(
     csv_file = os.path.join(logs_dir, time_interval + ".csv")
 
     df = pd.DataFrame(node_list)
+    for c in ("entropy", "abstain", "novelty", "novelty_y"):                      # CALIBER
+        if c in results and torch.is_tensor(results[c]) and results[c].numel() == len(df):
+            df[c] = results[c].detach().cpu().numpy().astype(np.float32)
     df.to_csv(csv_file, sep=",", header=True, index=False, encoding="utf-8")
     return losses
 

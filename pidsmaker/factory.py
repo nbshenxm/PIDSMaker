@@ -60,12 +60,33 @@ def build_model(data_sample, device, cfg, max_node_num, all_data=None):
         cfg, device=device, graph_reindexer=graph_reindexer
     )
     model = model_factory(encoder, objectives, objective_few_shot, cfg, device=device)
+    _attach_node_density(model)
 
     if cfg._is_running_mc_dropout:
         dropout = cfg.experiment.uncertainty.mc_dropout.dropout
         add_dropout_to_model(model, p=dropout)
 
     return model
+
+
+def _attach_node_density(model):
+    """CALIBER --density for node-type prediction (decoder none): the classifier's last layer is
+    the encoder's last nn.Linear producing the class logits (SAGE: last SAGEConv's root weight,
+    RCaid: final MLP layer); its input is the node representation whose density is fitted."""
+    from pidsmaker.objectives.predict_node_type import NodeTypePrediction
+
+    objs = [getattr(o, "objective", o) for o in model.objectives]
+    objs = [o for o in objs if isinstance(o, NodeTypePrediction) and o.density]
+    if not objs:
+        return
+    for o in objs:
+        width = o.node_type_dim + (1 if o.abstain else 0)
+        # torch nn.Linear or PyG's dense Linear (used inside SAGEConv / GATConv)
+        lins = [m for m in model.encoder.modules() if type(m).__name__ == "Linear"
+                and getattr(m, "out_features", getattr(m, "out_channels", None)) == width]
+        if not lins:
+            raise ValueError("--density: no output layer of width %d in %s" % (width, type(model.encoder).__name__))
+        o.attach_density_layer(lins[-1])
 
 
 def model_factory(encoder, objectives, objective_few_shot, cfg, device):
@@ -94,9 +115,18 @@ def model_factory(encoder, objectives, objective_few_shot, cfg, device):
     ).to(device)
 
 
+def _node_abstain_extra(cfg):
+    """CALIBER: --abstain on a node-type-prediction detector (decoder none) adds one "abstain"
+    unit to the classifier output, i.e. to the encoder output. 0 when the flag is absent."""
+    if not getattr(cfg, "_abstain", ""):
+        return 0
+    used = [m.strip() for m in cfg.training.decoder.used_methods.split(",")]
+    return 1 if "predict_node_type" in used else 0
+
+
 def encoder_block_factory(cfg, msg_dim, in_dim, edge_dim, device, max_node_num):
     node_hid_dim = cfg.training.node_hid_dim
-    node_out_dim = cfg.training.node_out_dim
+    node_out_dim = cfg.training.node_out_dim + _node_abstain_extra(cfg)
     dropout = cfg.training.encoder.dropout
     tgn_memory_dim = cfg.training.encoder.tgn.tgn_memory_dim
     tgn_time_dim = cfg.training.encoder.tgn.tgn_time_dim
@@ -336,7 +366,7 @@ def inner_encoder_factory(cfg, in_dim, encoder, original_edge_dim, node_map, edg
     return encoder
 
 def encoder_factory(cfg, msg_dim, in_dim, edge_dim, device, max_node_num, graph_reindexer):
-    node_out_dim = cfg.training.node_out_dim
+    node_out_dim = cfg.training.node_out_dim + _node_abstain_extra(cfg)
     dropout = cfg.training.encoder.dropout
     use_tgn = "tgn" in cfg.training.encoder.used_methods
     node_map = get_node_map(from_zero=True)
@@ -807,12 +837,22 @@ def objective_factory(cfg, in_dim, graph_reindexer, device, objective_cfg=None, 
             decoder = decoder_factory(
                 method, objective, cfg, in_dim=node_out_dim, out_dim=node_out_dim, device=device
             )
+            # CALIBER: abstention / novelty density (default off)
+            node_abstain = None
+            if _node_abstain_extra(cfg):
+                import json
+                node_abstain = json.loads(cfg._abstain)
+                if cfg.training.node_out_dim != cfg.dataset.num_node_types:
+                    raise ValueError("--abstain on predict_node_type needs node_out_dim = num_node_types "
+                                     f"({cfg.training.node_out_dim} vs {cfg.dataset.num_node_types})")
             objectives.append(
                 NodeTypePrediction(
                     decoder=decoder,
                     loss_fn=loss_fn,
                     balanced_loss=balanced_loss,
                     node_type_dim=cfg.dataset.num_node_types,
+                    abstain=node_abstain,
+                    density=bool(getattr(cfg, "_density", False)),
                 )
             )
 
