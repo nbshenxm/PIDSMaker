@@ -7,7 +7,8 @@ and the plain decoder's default runs (group da39a3ee5e) for its surprise channel
 the plain+density runs when the default group lacks a seed). Members = seeds x saved epochs >= SNAP.
 
 Edge level (abstaining decoder, members of one seed = its snapshots):
-  consensus abstention   every member abstains (p > THR)
+  consensus abstention   every member of a seed abstains (p > THR); for pools of several seeds,
+                         a majority of seeds abstain unanimously (within-seed unanimity)
   q_any                  mean surprise where no member abstains, else 0
   q_hier (pools)         q_any within each seed, then the mean over seeds
 Unit level (unit = entity x batch window, max over its edges), each channel mapped to the
@@ -195,7 +196,10 @@ def _score(seeds, A, P, plain_v, plain_t, rv, rt, uv, ut):
     """Frozen scorer on the seed pool `seeds`. Returns dict of (val, test) unit arrays."""
     def pool(stats):
         ss = [stats[s] for s in seeds]
-        all_ = np.logical_and.reduce([x["all"] for x in ss])
+        # gate of the bulk-novelty test: one seed = unanimity over its snapshots; pooled = a majority
+        # of runs abstain unanimously (flat unanimity over all members shrinks the set as runs are
+        # added: pooled ATLAS rr 68.4 -> 39.9, others unchanged)
+        all_ = np.mean([x["all"] for x in ss], 0) >= 0.5
         n = sum(x["n"] for x in ss)
         nov = sum(x["nov"] for x in ss) / n
         if len(ss) == 1:
@@ -361,7 +365,7 @@ def scored_stream(kind, artifact_dir, system, dataset, labels, seeds=(0, 1, 2)):
     is cached under <artifact_dir>/caliber/cache (labels are re-applied on load)."""
     import pickle
     cdir = os.path.join(artifact_dir, "caliber", "cache")
-    cp = os.path.join(cdir, f"abstain_score_{system}_{dataset}_s{'-'.join(map(str, seeds))}.pkl")
+    cp = os.path.join(cdir, f"abstain_score_v2_{system}_{dataset}_s{'-'.join(map(str, seeds))}.pkl")
     st = None
     if os.path.exists(cp):
         with open(cp, "rb") as fh:
