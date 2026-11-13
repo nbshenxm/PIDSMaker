@@ -284,13 +284,23 @@ def main():
     ap.add_argument("--tag", default="", help="suffix for the report file")
     ap.add_argument("--detector", default="model", choices=["model", "allowlist"],
                     help="allowlist: executable-novelty baseline on the same units (Guerra et al.)")
+    ap.add_argument("--scorer", default="ensemble", choices=["ensemble", "abstain", "plain3"],
+                    help="ensemble: robust-z mean of the group's runs (default); abstain: the "
+                         "abstention-aware scorer (caliber.abstain_score) on density runs; plain3: "
+                         "its plain-surprise channel alone on the same units and seeds")
+    ap.add_argument("--seeds", default="0,1,2", help="seeds for --scorer abstain/plain3")
     args = ap.parse_args()
     cache = os.path.join(args.artifact_dir, "caliber", "cache")
     members = data.group_manifests(data.load_manifests(
         args.artifact_dir, args.system, args.dataset, args.group))[(args.system, args.dataset, args.group)]
     labels, meta = data.labels_for(members[0], args.artifact_dir)
     labels = _with_borrower(labels, members[0], args.artifact_dir)
-    st = ensemble_stream(members, labels, cache_dir=cache)
+    if args.scorer == "ensemble":
+        st = ensemble_stream(members, labels, cache_dir=cache)
+    else:
+        from caliber import abstain_score
+        st = abstain_score.scored_stream(args.scorer, args.artifact_dir, args.system, args.dataset,
+                                         labels, seeds=tuple(int(s) for s in args.seeds.split(",")))
     tz = labels.get("timezone", "US/Eastern")
     keys, has_lin = case_keys(st, args.artifact_dir, args.dataset, meta)
     keys_val, _ = case_keys(st, args.artifact_dir, args.dataset, meta, split="val")
@@ -320,7 +330,11 @@ def main():
         for kind, subset in configs:
             S = np.nanmean(Z[subset], 0)
             S_val = np.nanmean(Zv[subset], 0)
-            if len(subset) > 1:                     # review statistic: upper bound over runs
+            if args.scorer != "ensemble" and len(subset) == M and M > 1:
+                # the pooled scorer is not the mean of the per-run scores; its interval is
+                # computed in abstain_score (U = S + KAPPA * sd over runs / sqrt(R))
+                S, S_val, U, U_val = st["S"], st["S_val"], st["U"], st["U_val"]
+            elif len(subset) > 1:                   # review statistic: upper bound over runs
                 U = S + KAPPA * np.nan_to_num(np.nanstd(Z[subset], 0) / np.sqrt(len(subset)))
                 U_val = S_val + KAPPA * np.nan_to_num(np.nanstd(Zv[subset], 0) / np.sqrt(len(subset)))
             else:
@@ -336,7 +350,8 @@ def main():
         print(f"B={B} done", flush=True)
     rep = os.path.join(args.artifact_dir, "caliber", "reports")
     tag = args.system if args.detector == "model" else "allowlist"
-    out = os.path.join(rep, f"deploy_{tag}_{args.dataset}_{args.group}{args.tag}.json")
+    sc = "" if args.scorer == "ensemble" else f"_{args.scorer}"
+    out = os.path.join(rep, f"deploy_{tag}_{args.dataset}_{args.group}{sc}{args.tag}.json")
     with open(out, "w", encoding="utf-8") as fh:
         json.dump(rows, fh)
     summarize(rows, f"{args.system}/{args.dataset}")

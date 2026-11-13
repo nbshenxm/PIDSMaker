@@ -363,13 +363,23 @@ def main():
                     help="only all-to-triage and B_auto=0.25 (eta_act=1.0)")
     ap.add_argument("--single_all", action="store_true",
                     help="single-run rules for every member (mean and range), not only member 0")
+    ap.add_argument("--scorer", default="ensemble", choices=["ensemble", "abstain", "plain3"],
+                    help="unit scores: ensemble (default) or caliber.abstain_score (S = pooled "
+                         "scorer, Z = per-seed scorer, so the interval is over training runs)")
+    ap.add_argument("--seeds", default="0,1,2", help="seeds for --scorer abstain/plain3")
+    ap.add_argument("--tag", default="", help="suffix for the report file")
     args = ap.parse_args()
     cache = os.path.join(args.artifact_dir, "caliber", "cache")
     members = data.group_manifests(data.load_manifests(
         args.artifact_dir, args.system, args.dataset, args.group))[(args.system, args.dataset, args.group)]
     labels, meta = data.labels_for(members[0], args.artifact_dir)
     labels = _with_borrower(labels, members[0], args.artifact_dir)
-    st = ensemble_stream(members, labels, cache_dir=cache)
+    if args.scorer == "ensemble":
+        st = ensemble_stream(members, labels, cache_dir=cache)
+    else:
+        from caliber import abstain_score
+        st = abstain_score.scored_stream(args.scorer, args.artifact_dir, args.system, args.dataset,
+                                         labels, seeds=tuple(int(s) for s in args.seeds.split(",")))
     tz = labels.get("timezone", "US/Eastern")
     B = args.budget
     lin, has_lin = case_keys(st, args.artifact_dir, args.dataset, meta)
@@ -469,7 +479,8 @@ def main():
               f"{fmt('attacks_handled')}/{rs[0].get('attacks', '-')} (auto {fmt('attacks_automated')})",
               flush=True)
     rep = os.path.join(args.artifact_dir, "caliber", "reports")
-    with open(os.path.join(rep, f"tiers_{args.system}_{args.dataset}_{args.group}_B{int(B)}.json"),
+    sc = "" if args.scorer == "ensemble" else f"_{args.scorer}"
+    with open(os.path.join(rep, f"tiers_{args.system}_{args.dataset}_{args.group}{sc}{args.tag}_B{int(B)}.json"),
               "w", encoding="utf-8") as fh:
         json.dump(out, fh, indent=1)
 

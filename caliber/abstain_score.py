@@ -289,7 +289,8 @@ def stream(artifact_dir, system, dataset, labels, seeds=(0, 1, 2), base_group=BA
         "U": pooled["r"][1] + KAPPA * sem_t, "U_val": pooled["r"][0] + KAPPA * sem_v,
         "Umax": np.maximum(pooled["r"][1], Zt.max(0)), "Umax_val": np.maximum(pooled["r"][0], Zv.max(0)),
         "Z": Zt, "Z_val": Zv,
-        "t1": ut["t1"].values, "w": ut.index.get_level_values("w").values, "y": y,
+        "t0": ut["t0"].values, "t1": ut["t1"].values,
+        "w": ut.index.get_level_values("w").values, "y": y,
         "node": ut.index.get_level_values("node").values, "partner": ut["partner"].values,
         "t_val": uv["t1"].values, "node_val": uv.index.get_level_values("node").values,
         "partner_val": uv["partner"].values,
@@ -338,3 +339,40 @@ def bstar(S, st, artifact_dir, dataset, meta, attacks, tz, keys=None):
             best[a] = min(best.get(a, np.inf), (rank[inv[i]] + 1) / n_days)
     gm = float(np.exp(np.mean(np.log(np.maximum(list(best.values()), 1.0))))) if best else np.nan
     return best, gm
+
+
+def as_plain(st):
+    """The same units scored by the plain decoder's surprise channel b alone (matched baseline:
+    same seeds, same snapshot members, same unit table)."""
+    out = dict(st)
+    bv, bt = st["views"]["b"]
+    Zv = np.vstack([p["b"][0] for p in st["views_per_seed"]])
+    Zt = np.vstack([p["b"][1] for p in st["views_per_seed"]])
+    R = Zt.shape[0]
+    sem_v = Zv.std(0, ddof=1) / np.sqrt(R) if R > 1 else 0.0
+    sem_t = Zt.std(0, ddof=1) / np.sqrt(R) if R > 1 else 0.0
+    out.update({"S": bt, "S_val": bv, "Z": Zt, "Z_val": Zv,
+                "U": bt + KAPPA * sem_t, "U_val": bv + KAPPA * sem_v})
+    return out
+
+
+def scored_stream(kind, artifact_dir, system, dataset, labels, seeds=(0, 1, 2)):
+    """kind: 'abstain' (frozen scorer) or 'plain3' (b alone on the same units). The scored stream
+    is cached under <artifact_dir>/caliber/cache (labels are re-applied on load)."""
+    import pickle
+    cdir = os.path.join(artifact_dir, "caliber", "cache")
+    cp = os.path.join(cdir, f"abstain_score_{system}_{dataset}_s{'-'.join(map(str, seeds))}.pkl")
+    st = None
+    if os.path.exists(cp):
+        with open(cp, "rb") as fh:
+            st = pickle.load(fh)
+        idx = pd.DataFrame({"t0": st["t0"], "t1": st["t1"]},
+                           index=pd.MultiIndex.from_arrays([st["w"], st["node"]], names=["w", "node"]))
+        st["y"] = unit_labels(idx, "entity_window", labels)
+    if st is None:
+        st = stream(artifact_dir, system, dataset, labels, seeds=seeds)
+        os.makedirs(cdir, exist_ok=True)
+        with open(cp + ".tmp", "wb") as fh:
+            pickle.dump(st, fh, protocol=4)
+        os.replace(cp + ".tmp", cp)
+    return as_plain(st) if kind == "plain3" else st
