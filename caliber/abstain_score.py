@@ -86,7 +86,7 @@ def snapshots(m, snap=None):
     return eps[-LAST:] if LAST else eps
 
 
-ABMEM = float(os.environ.get("CALIBER_ABMEM", "0"))  # > 0: see abstain_snapshots
+ABMEM = float(os.environ.get("CALIBER_ABMEM", "0.5"))  # > 0: see abstain_snapshots
 _ABMEM_CACHE = {}
 
 
@@ -112,7 +112,7 @@ def abstain_snapshots(m):
 
 def _variant():
     """Cache-key suffix for non-default members or abstaining configuration."""
-    if (SNAP, LAST, SPEC_ABSTAIN, ABMEM) == (3, 0, '{"o":3}', 0.0):
+    if (SNAP, LAST, SPEC_ABSTAIN, ABMEM) == (3, 0, '{"o":3}', 0.5):
         return ""
     import hashlib
     return "_" + hashlib.md5(f"{SNAP}|{LAST}|{SPEC_ABSTAIN}|{ABMEM}".encode()).hexdigest()[:8]
@@ -430,7 +430,7 @@ def scored_stream(kind, artifact_dir, system, dataset, labels, seeds=(0, 1, 2)):
     is cached under <artifact_dir>/caliber/cache (labels are re-applied on load)."""
     import pickle
     cdir = os.path.join(artifact_dir, "caliber", "cache")
-    cp = os.path.join(cdir, f"abstain_score_v3_{system}_{dataset}_s{'-'.join(map(str, seeds))}{_variant()}.pkl")
+    cp = os.path.join(cdir, f"abstain_score_v4_{system}_{dataset}_s{'-'.join(map(str, seeds))}{_variant()}.pkl")
     st = None
     if os.path.exists(cp):
         with open(cp, "rb") as fh:
