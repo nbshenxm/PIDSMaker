@@ -1,4 +1,6 @@
-"""Abstention-aware unit scorer (design frozen 2026-11-13, notes/2026-11-13_paper_direction.md).
+"""Abstention-aware unit scorer (design frozen 2026-11-13, notes/2026-11-13_paper_direction.md;
+revisions: 1 majority-of-runs unanimity, 2 lagged novelty history, 3 abstention members (ABMEM),
+4 collapse guard (SPEC_WARM)).
 
 Inputs: per detector and dataset, two density-enabled training configurations with the same seeds:
   abstaining decoder   --abstain {"o":3} --density   (gambler's-loss abstention + novelty column)
@@ -7,6 +9,12 @@ and the plain decoder's default runs (group da39a3ee5e) for its surprise channel
 the plain+density runs when the default group lacks a seed). Members = seeds x saved epochs >= SNAP.
 
 Edge level (abstaining decoder, members of one seed = its snapshots):
+  collapse guard         (rev. 4) a seed whose abstaining run abstains on > COLLAPSE of validation
+                         events at every snapshot is replaced by its warm-up run (SPEC_WARM)
+  abstention members     (rev. 3) a snapshot votes on abstention only once it has learned to abstain:
+                         its validation abstention share >= ABMEM x the run's peak share over its
+                         snapshots (label-free; a slowly learning run would otherwise veto with its
+                         early snapshots). Surprise and novelty use all snapshots >= SNAP.
   consensus abstention   every member of a seed abstains (p > THR); for pools of several seeds,
                          a majority of seeds abstain unanimously (within-seed unanimity)
   q_any                  mean surprise where no member abstains, else 0
@@ -90,6 +98,55 @@ ABMEM = float(os.environ.get("CALIBER_ABMEM", "0.5"))  # > 0: see abstain_snapsh
 _ABMEM_CACHE = {}
 
 
+_SHARE_CACHE = {}
+
+
+def _val_share(m, e):
+    """Share of validation edges snapshot e of an abstaining run abstains on (p > THR)."""
+    key = (m["edge_losses_dir"], e)
+    if key not in _SHARE_CACHE:
+        _SHARE_CACHE[key] = float((data.read_split(m["edge_losses_dir"], "val", e, None)["abstain"].values
+                                   > THR).mean())
+    return _SHARE_CACHE[key]
+
+
+# Collapse guard. Before a model predicts better than 1/o, abstaining on every event is the
+# gambler's-loss optimum (loss log o); a slowly learning detector can lock into it from the first
+# steps and then abstains on everything (Kairos on ATLAS). Such a run carries no abstention signal.
+# A run whose every snapshot abstains on more than COLLAPSE of the validation events is replaced by
+# the same seed trained with a cross-entropy warm-up (SPEC_WARM: plain cross-entropy until the running
+# training loss falls below log o). Label-free; runs that do not collapse are untouched.
+SPEC_WARM = '{"o":3,"warm":"auto"}'
+COLLAPSE = 0.99
+
+
+def collapsed(m):
+    eps = snapshots(m)
+    return bool(eps) and all(_val_share(m, e) > COLLAPSE for e in eps)
+
+
+def abstain_runs(runs, seeds, spec=None):
+    """{seed: manifest} of the abstaining runs to score, with the collapse guard applied when the
+    default configuration is used, and the seeds that fell back to SPEC_WARM."""
+    spec = SPEC_ABSTAIN if spec is None else spec
+    ab = runs.get(spec, {})
+    if spec != '{"o":3}':
+        return {s: ab[s] for s in seeds if s in ab}, ()
+    warm = runs.get(SPEC_WARM, {})
+    out, fell = {}, []
+    for s in seeds:
+        m = ab.get(s)
+        if (m is None or collapsed(m)) and s in warm:
+            if m is not None:
+                print(f"  collapse guard: seed {s} abstains on > {COLLAPSE} of validation events at every "
+                      f"snapshot -> warm-up run", flush=True)
+            out[s] = warm[s]
+            fell.append(s)
+        elif m is not None:
+            out[s] = m
+    return out, tuple(fell)
+
+
 def abstain_snapshots(m):
     """Snapshots of an abstaining run that vote on abstention. With ABMEM = f > 0, a snapshot
     votes only once it has learned to abstain: its validation abstention share is at least f
@@ -100,8 +157,7 @@ def abstain_snapshots(m):
         return eps
     key = (m["edge_losses_dir"], tuple(eps))
     if key not in _ABMEM_CACHE:
-        share = {e: float((data.read_split(m["edge_losses_dir"], "val", e, None)["abstain"].values > THR).mean())
-                 for e in eps}
+        share = {e: _val_share(m, e) for e in eps}
         peak = max(share.values())
         keep = [e for e in eps if peak > 0 and share[e] >= ABMEM * peak] or eps
         print(f"  abstain members seed {m.get('seed')}: shares "
@@ -309,7 +365,7 @@ def stream(artifact_dir, system, dataset, labels, seeds=(0, 1, 2), base_group=BA
     scorer. S = pooled scorer r, Z = per-seed r_m, U = S + KAPPA * sd(Z)/sqrt(R). Also returns the
     round-robin views (S3, C) and the channels for diagnostics under st['views']."""
     runs = density_runs(artifact_dir, system, dataset)
-    ab = {s: m for s, m in runs.get(spec, {}).items() if s in seeds}
+    ab, _ = abstain_runs(runs, seeds, spec)
     pl = {s: m for s, m in runs.get("none", {}).items() if s in seeds}
     seeds = tuple(s for s in seeds if s in ab and s in pl)
     if not seeds:
@@ -430,7 +486,10 @@ def scored_stream(kind, artifact_dir, system, dataset, labels, seeds=(0, 1, 2)):
     is cached under <artifact_dir>/caliber/cache (labels are re-applied on load)."""
     import pickle
     cdir = os.path.join(artifact_dir, "caliber", "cache")
-    cp = os.path.join(cdir, f"abstain_score_v4_{system}_{dataset}_s{'-'.join(map(str, seeds))}{_variant()}.pkl")
+    _, fell = abstain_runs(density_runs(artifact_dir, system, dataset), seeds)
+    wtag = f"_w{'-'.join(map(str, fell))}" if fell else ""
+    cp = os.path.join(cdir, f"abstain_score_v4_{system}_{dataset}_s{'-'.join(map(str, seeds))}"
+                            f"{_variant()}{wtag}.pkl")
     st = None
     if os.path.exists(cp):
         with open(cp, "rb") as fh:
