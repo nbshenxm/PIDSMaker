@@ -86,12 +86,36 @@ def snapshots(m, snap=None):
     return eps[-LAST:] if LAST else eps
 
 
+ABMEM = float(os.environ.get("CALIBER_ABMEM", "0"))  # > 0: see abstain_snapshots
+_ABMEM_CACHE = {}
+
+
+def abstain_snapshots(m):
+    """Snapshots of an abstaining run that vote on abstention. With ABMEM = f > 0, a snapshot
+    votes only once it has learned to abstain: its validation abstention share is at least f
+    times the run's peak share over its snapshots (label-free; drops snapshots taken before the
+    abstaining objective engaged or converged; keeps all snapshots when the share is stable)."""
+    eps = snapshots(m)
+    if ABMEM <= 0 or len(eps) < 2:
+        return eps
+    key = (m["edge_losses_dir"], tuple(eps))
+    if key not in _ABMEM_CACHE:
+        share = {e: float((data.read_split(m["edge_losses_dir"], "val", e, None)["abstain"].values > THR).mean())
+                 for e in eps}
+        peak = max(share.values())
+        keep = [e for e in eps if peak > 0 and share[e] >= ABMEM * peak] or eps
+        print(f"  abstain members seed {m.get('seed')}: shares "
+              + " ".join(f"{e}:{share[e]:.3f}" for e in eps) + f" -> {keep}", flush=True)
+        _ABMEM_CACHE[key] = keep
+    return _ABMEM_CACHE[key]
+
+
 def _variant():
     """Cache-key suffix for non-default members or abstaining configuration."""
-    if (SNAP, LAST, SPEC_ABSTAIN) == (3, 0, '{"o":3}'):
+    if (SNAP, LAST, SPEC_ABSTAIN, ABMEM) == (3, 0, '{"o":3}', 0.0):
         return ""
     import hashlib
-    return "_" + hashlib.md5(f"{SNAP}|{LAST}|{SPEC_ABSTAIN}".encode()).hexdigest()[:8]
+    return "_" + hashlib.md5(f"{SNAP}|{LAST}|{SPEC_ABSTAIN}|{ABMEM}".encode()).hexdigest()[:8]
 
 
 def _edge_stats(ms, split, with_abstain):
@@ -100,7 +124,7 @@ def _edge_stats(ms, split, with_abstain):
     ref, per = None, {}
     for s, m in ms.items():
         st = None
-        for e in snapshots(m):
+        for e in (abstain_snapshots(m) if with_abstain else snapshots(m)):
             df = data.read_split(m["edge_losses_dir"], split, e, None)
             if ref is None:
                 ref = df[["srcnode", "dstnode", "time", "b", "edge_type"]].reset_index(drop=True)
