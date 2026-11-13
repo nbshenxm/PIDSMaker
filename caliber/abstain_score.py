@@ -20,7 +20,8 @@ validation tail -log P_val(X >= x) (exponential tail beyond the top 1%, no satur
           validation abstained edges of the same type (Mondrian; global quantile for types with
           < MIN_TYPE validation edges), sign test -log P(Binom(m, 1-L) >= k_L), max over LEVELS,
           tail-calibrated on validation units; computed for the abstaining and the plain decoder's
-          novelty and combined by max (recalibrated)
+          novelty and combined by max (recalibrated), then taken relative to the entity's own history:
+          minus the largest novelty it showed in windows ending >= LAG_H (24 h) earlier (lag_excess)
 Ranking: round-robin of S = b + q + mlvmax and C = b + q.
 Scalar for the online controller: r = max(tail_S(S), tail_C(C)) on validation units (a unit
 enters when it is extreme in either view, the calibrated analogue of the round-robin).
@@ -43,6 +44,7 @@ MIN_TYPE = 50
 SPEC_ABSTAIN = '{"o":3}'
 BASE_GROUP = "da39a3ee5e"
 KAPPA = 1.645
+LAG_H = 24.0          # novelty history lag: one review day
 HOUR = 3600 * 10**9
 
 
@@ -173,6 +175,31 @@ def bulk_novelty(rv, gv, nv, rt, gt, nt, uv_idx, ut_idx):
     return f(mv), f(mt)
 
 
+def lag_excess(node_v, t_v, nov_v, node_t, t_t, nov_t, lag_h=None):
+    """Novelty relative to the entity's own history: nov minus the largest novelty the same entity
+    showed in windows ending at least lag_h hours earlier (validation, then test), floored at 0.
+    Novelty surfaced a review day ago was delivered then; repeating it every day is routine (a
+    persistent novel benign entity otherwise tops every day). Recent repeats (an intrusion's
+    consecutive windows) keep their credit."""
+    lag_h = LAG_H if lag_h is None else lag_h
+    nodes = np.r_[node_v, node_t]
+    t = np.r_[t_v, t_t].astype(np.float64)
+    nv = np.r_[nov_v, nov_t].astype(np.float64)
+    rank = pd.factorize(nodes)[0].astype(np.float64)
+    span = t.max() - t.min() + 10 * 86400e9
+    key = rank * span + (t - t.min())
+    o = np.argsort(key, kind="stable")
+    ks, vs, gs = key[o], nv[o], rank[o]
+    cm = pd.Series(vs).groupby(gs).cummax().values
+    pos = np.searchsorted(ks, ks - lag_h * 3600e9, side="right") - 1
+    ok = (pos >= 0) & (gs[np.maximum(pos, 0)] == gs)
+    prev = np.where(ok, cm[np.maximum(pos, 0)], 0.0)
+    ex = np.empty(len(nv))
+    ex[o] = np.maximum(vs - np.maximum(prev, 0.0), 0.0)
+    return ex[:len(node_v)], ex[len(node_v):]
+
+
+
 # ----------------------------------------------------------------------------- plain surprise
 def plain_unit_scores(ms):
     """Plain decoder: robust-z (own validation units) unit max per snapshot member, mean per seed.
@@ -222,6 +249,9 @@ def _score(seeds, A, P, plain_v, plain_t, rv, rt, uv, ut):
     vp, tp = bulk_novelty(rv, gv, nplv, rt, gt, nplt, uv.index, ut.index)
     fm = tail_fn(np.maximum(vo, vp))
     n_v, n_t = fm(np.maximum(vo, vp)), fm(np.maximum(to, tp))
+    # novelty an entity already showed a review day earlier (>= LAG_H) was surfaced then: routine now
+    n_v, n_t = lag_excess(uv.index.get_level_values("node").values, uv["t1"].values, n_v,
+                          ut.index.get_level_values("node").values, ut["t1"].values, n_t)
     # plain surprise b: mean over seeds of the seed means (robust z), validation tail over the
     # plain decoder's own validation units; units it lacks score 0
     bv_all = pd.concat([plain_v[s] for s in seeds], axis=1).mean(1)
@@ -365,7 +395,7 @@ def scored_stream(kind, artifact_dir, system, dataset, labels, seeds=(0, 1, 2)):
     is cached under <artifact_dir>/caliber/cache (labels are re-applied on load)."""
     import pickle
     cdir = os.path.join(artifact_dir, "caliber", "cache")
-    cp = os.path.join(cdir, f"abstain_score_v2_{system}_{dataset}_s{'-'.join(map(str, seeds))}.pkl")
+    cp = os.path.join(cdir, f"abstain_score_v3_{system}_{dataset}_s{'-'.join(map(str, seeds))}.pkl")
     st = None
     if os.path.exists(cp):
         with open(cp, "rb") as fh:
