@@ -10,6 +10,7 @@ false-automation budget) runs on one view; the others only review.
 """
 import numpy as np
 
+from caliber.budget import HOUR
 from caliber.tiers import replay_tiers
 
 
@@ -27,11 +28,18 @@ def merge_cases(results):
     parent = list(range(offs[-1]))
     n_units = len(results[0][0])
     first = np.full(n_units, -1, np.int64)
+    flood = np.array([bool(c.get("flood")) for _, cs in results for c in cs], bool)
     for k, (case_of, _) in enumerate(results):
         ix = np.flatnonzero(case_of >= 0)
         gid = case_of[ix] + offs[k]
         has = first[ix] >= 0
-        for a, b in zip(first[ix][has], gid[has]):
+        for i, a, b in zip(ix[has], first[ix][has], gid[has]):
+            # summary (bulk) items span many lineages and hours: never merge through them; a unit
+            # in an individual case of one view and a summary of another belongs to the former
+            if flood[a] or flood[b]:
+                if flood[a] and not flood[b]:
+                    first[i] = b
+                continue
             ra, rb = _find(parent, int(a)), _find(parent, int(b))
             if ra != rb:
                 parent[rb] = ra
@@ -69,11 +77,18 @@ def replay_views(Ss, t, w, y, keys, B, q0s, etas, rng, act_view=0, act=None, **c
     B_auto, S_act, act_key, act_seen) applied to view act_view. common: max_gap_ns, flood_cap,
     refund_delay_ns, bucket_h."""
     K = len(Ss)
-    res = []
+    res, skip = [], set()
+    hour = (np.asarray(t) // HOUR).astype(np.int64)
     for k, S in enumerate(Ss):
         a = dict(act or {}) if k == act_view else {}
         pi, audit = a.pop("pi", 2.0), a.pop("audit", 0.0)
         eta_act, q_act0 = a.pop("eta_act", 0.0), a.pop("q_act0", np.inf)
-        res.append(replay_tiers(S, t, w, y, keys, B / K, q0s[k], etas[k], pi, audit, eta_act,
-                                q_act0, rng, **a, **common))
+        # cases an earlier view already delivered are not charged again: each controller fills
+        # its B/K with cases of its own, so the union stays within B and uses it
+        case_of, cases = replay_tiers(S, t, w, y, keys, B / K, q0s[k], etas[k], pi, audit, eta_act,
+                                      q_act0, rng, skip_keys=skip if skip else None, **a, **common)
+        res.append((case_of, cases))
+        ix = np.flatnonzero(case_of >= 0)
+        ind = ~np.array([bool(cases[c].get("flood")) for c in case_of[ix]], bool)
+        skip |= set(zip(np.asarray(keys)[ix[ind]].tolist(), hour[ix[ind]].tolist()))
     return merge_cases(res)

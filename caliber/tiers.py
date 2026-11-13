@@ -91,7 +91,7 @@ def bucket_depth(B, bucket_h=BUCKET_H):
 def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
                  max_gap_ns=HOUR, window_audits=50, B_auto=None, S_act=None,
                  flood_cap="auto", refund_delay_ns=0, act_key=None, act_seen=None,
-                 bucket_h=None):
+                 bucket_h=None, skip_keys=None):
     """B_auto: if set, q_act is driven by a false-automation budget instead of a precision
     target: at most ~B_auto benign cases per day may be acted on automatically. Same
     label-free controller as the review budget (Proposition 1): every new tier-A case counts
@@ -117,7 +117,9 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
     that is delivered, as a single item, when the next token arrives (never automated). The
     threshold controller counts demand (every case that would have opened) and each batch's
     update is clipped to +-eta*D (integrator anti-windup): a burst, or a gap in the data, moves the
-    threshold by at most one bucket's worth, which replaces the gap cap and the flood step."""
+    threshold by at most one bucket's worth, which replaces the gap cap and the flood step.
+    skip_keys: (case key, hour) pairs whose case another controller already delivered (online
+    round-robin, caliber.multiview); their alerts open no case here and are not charged."""
     seen = set(act_seen or ())
     S_act = S if S_act is None else S_act
     use_bucket = bucket_h is not None
@@ -147,6 +149,8 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
         for i in al[np.argsort(-S[al], kind="stable")]:
             kh = (keys[i], int(t[i] // HOUR))
             c = open_case.get(kh)
+            if c is None and skip_keys is not None and kh in skip_keys:
+                continue                           # case already delivered by another view
             if c is None and use_bucket and tokens < 1.0:
                 wants_review = not (S_act[i] >= q_act and (act_key is None or act_key[i] not in seen))
                 if wants_review:                   # no token: join the pending summary case
