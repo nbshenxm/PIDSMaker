@@ -372,6 +372,8 @@ def main():
                          "scorer, Z = per-seed scorer, so the interval is over training runs)")
     ap.add_argument("--seeds", default="0,1,2", help="seeds for --scorer abstain/plain3")
     ap.add_argument("--tag", default="", help="suffix for the report file")
+    ap.add_argument("--act_on", default="score", choices=["score", "plain"],
+                    help="abstain scorers: act tier on the scorer (default) or on the plain-decoder mean b")
     args = ap.parse_args()
     cache = os.path.join(args.artifact_dir, "caliber", "cache")
     members = data.group_manifests(data.load_manifests(
@@ -399,6 +401,9 @@ def main():
     if args.scorer == "abstain_dual":
         from caliber import abstain_score as _asc
         dual = _asc.dual_views(st)
+        act_t, act_v = dual[0][0], dual[0][1]
+        if args.act_on == "plain":
+            act_t, act_v = st["views"]["b"][1], st["views"]["b"][0]
     rules = []
     for r_ in args.rules.split(","):    # single-run rules: every member, reported as mean/range
         rules += [f"{r_}#{m}" for m in range(M)] if r_.startswith("single_run") and args.single_all else [r_]
@@ -420,6 +425,8 @@ def main():
                 S_act, cal_act = np.nanmedian(st["Z"], 0), np.nanmedian(st["Z_val"], 0)
             else:
                 S_act, cal_act = st["S"], st["S_val"]
+            if args.act_on == "plain" and "views" in st:   # act on the plain decoder's mean
+                S_act, cal_act = st["views"]["b"][1], st["views"]["b"][0]
         else:   # ensemble_ci: review on the upper bound, act on the lower bound
             S, cal = st["S"] + args.kappa * sem, st["S_val"] + args.kappa * sem_val
             S_act, cal_act = st["S"] - args.kappa * sem, st["S_val"] - args.kappa * sem_val
@@ -456,9 +463,9 @@ def main():
                         seen_d |= set(exe_val[np.isfinite(Uv) & (Uv >= qk)].tolist())
                     act = None
                     if b_auto is not None:
-                        v0 = dual[0][1][np.isfinite(dual[0][1])]
+                        v0 = act_v[np.isfinite(act_v)]
                         act = {"pi": 2.0, "audit": audit, "eta_act": (eta_a or 0.02) * (float(np.std(v0)) or 1.0),
-                               "q_act0": float(np.sort(v0)[-ka]), "B_auto": b_auto, "S_act": dual[0][0],
+                               "q_act0": float(np.sort(v0)[-ka]), "B_auto": b_auto, "S_act": act_t,
                                "act_key": exe_key if "_novel" in base else None,
                                "act_seen": seen_d if "_novel" in base else None}
                     case_of, cases = replay_views([d[2] for d in dual], st["t1"], st["w"], st["y"], lin,
