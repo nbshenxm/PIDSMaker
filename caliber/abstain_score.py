@@ -1,6 +1,6 @@
 """Abstention-aware unit scorer (design frozen 2026-11-13, notes/2026-11-13_paper_direction.md;
 revisions: 1 majority-of-runs unanimity, 2 lagged novelty history, 3 abstention members (ABMEM),
-4 collapse guard (SPEC_WARM)).
+4 collapse guard (SPEC_WARM), 5 prevalence channel and four-channel sum (PREV)).
 
 Inputs: per detector and dataset, two density-enabled training configurations with the same seeds:
   abstaining decoder   --abstain {"o":3} --density   (gambler's-loss abstention + novelty column)
@@ -30,9 +30,13 @@ validation tail -log P_val(X >= x) (exponential tail beyond the top 1%, no satur
           tail-calibrated on validation units; computed for the abstaining and the plain decoder's
           novelty and combined by max (recalibrated), then taken relative to the entity's own history:
           minus the largest novelty it showed in windows ending >= LAG_H (24 h) earlier (lag_excess)
-Ranking: round-robin of S = b + q + mlvmax and C = b + q.
-Scalar for the online controller: r = max(tail_S(S), tail_C(C)) on validation units (a unit
-enters when it is extreme in either view, the calibrated analogue of the round-robin).
+  rar     (rev. 5) prevalence of the unit's actions in the benign validation days (NoDoze-style):
+          sum of -log smoothed frequency of its PREV_K rarest distinct (source executable, event
+          type, target type) actions (see prevalence)
+Ranking (rev. 5, PREV=1): F = b + q + mlvmax + rar, a Fisher-style sum of four validation -log p;
+r = tail_F(F) is the scalar for the online controller. Per-day ratio to the plain detector over the
+12 development pairs: 0.39 (rev. 4: 0.52); PREV_K 3/5/10/all -> 0.44/0.39/0.39/0.43, 1 -> 0.64.
+(PREV=0, rev. 4: round-robin of S = b + q + mlvmax and C = b + q; r = max(tail_S(S), tail_C(C)).)
 Run-level interval: the scorer applied to each seed alone gives r_m; U = r + KAPPA sd_m(r_m)/sqrt(R).
 """
 import os
@@ -58,9 +62,9 @@ HOUR = 3600 * 10**9
 
 
 TAILCAP = int(os.environ.get("CALIBER_TAILCAP", "0"))
-# (rev. 5, candidate) prevalence channel and Fisher-style combination: score = b + q + nov + rar,
+# (rev. 5) prevalence channel and Fisher-style combination: score = b + q + nov + rar,
 # each a validation -log p; replaces the round-robin of S = b + q + nov and C = b + q.
-PREV = int(os.environ.get("CALIBER_PREV", "0"))
+PREV = int(os.environ.get("CALIBER_PREV", "1"))
 PREV_K = int(os.environ.get("CALIBER_PREV_K", "5"))
 
 
@@ -213,11 +217,11 @@ def abstain_snapshots(m):
 
 def _variant():
     """Cache-key suffix for non-default members or abstaining configuration."""
-    if (SNAP, LAST, SPEC_ABSTAIN, ABMEM, TAILCAP, PREV) == (3, 0, '{"o":3}', 0.5, 0, 0):
+    if (SNAP, LAST, SPEC_ABSTAIN, ABMEM, TAILCAP, PREV, PREV_K) == (3, 0, '{"o":3}', 0.5, 0, 1, 5):
         return ""
     import hashlib
     key = f"{SNAP}|{LAST}|{SPEC_ABSTAIN}|{ABMEM}" + (f"|cap{TAILCAP}" if TAILCAP else "") \
-        + (f"|prev{PREV_K}" if PREV else "")
+        + (f"|prev{PREV}k{PREV_K}")
     return "_" + hashlib.md5(key.encode()).hexdigest()[:8]
 
 
@@ -550,7 +554,7 @@ def scored_stream(kind, artifact_dir, system, dataset, labels, seeds=(0, 1, 2)):
     cdir = os.path.join(artifact_dir, "caliber", "cache")
     _, fell = abstain_runs(density_runs(artifact_dir, system, dataset), seeds)
     wtag = f"_w{'-'.join(map(str, fell))}" if fell else ""
-    cp = os.path.join(cdir, f"abstain_score_v4_{system}_{dataset}_s{'-'.join(map(str, seeds))}"
+    cp = os.path.join(cdir, f"abstain_score_v5_{system}_{dataset}_s{'-'.join(map(str, seeds))}"
                             f"{_variant()}{wtag}.pkl")
     st = None
     if os.path.exists(cp):
