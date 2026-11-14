@@ -57,12 +57,20 @@ LAG_H = 24.0          # novelty history lag: one review day
 HOUR = 3600 * 10**9
 
 
-def tail_fn(ref):
-    """-log P_ref(X >= x), with an exponential tail fitted to the top 1% beyond it."""
+TAILCAP = int(os.environ.get("CALIBER_TAILCAP", "0"))
+
+
+def tail_fn(ref, cap=False):
+    """-log P_ref(X >= x), with an exponential tail fitted to the top 1% beyond it. cap (with
+    TAILCAP): a channel claims at most the evidence its validation set resolves, -log 1/(n+1);
+    units beyond it are then ordered by the other channels of the sum."""
     r = np.sort(ref[np.isfinite(ref)])
     n = len(r)
     if n < 50:
         return lambda x: np.zeros(len(x))
+    if cap and TAILCAP:
+        f0, top = tail_fn(ref), float(np.log(n + 1.0))
+        return lambda x: np.minimum(f0(x), top)
     hi = r[int(0.99 * n):]
     lam = 1.0 / max(np.mean(hi - hi[0]), 1e-9)
 
@@ -168,10 +176,11 @@ def abstain_snapshots(m):
 
 def _variant():
     """Cache-key suffix for non-default members or abstaining configuration."""
-    if (SNAP, LAST, SPEC_ABSTAIN, ABMEM) == (3, 0, '{"o":3}', 0.5):
+    if (SNAP, LAST, SPEC_ABSTAIN, ABMEM, TAILCAP) == (3, 0, '{"o":3}', 0.5, 0):
         return ""
     import hashlib
-    return "_" + hashlib.md5(f"{SNAP}|{LAST}|{SPEC_ABSTAIN}|{ABMEM}".encode()).hexdigest()[:8]
+    key = f"{SNAP}|{LAST}|{SPEC_ABSTAIN}|{ABMEM}" + (f"|cap{TAILCAP}" if TAILCAP else "")
+    return "_" + hashlib.md5(key.encode()).hexdigest()[:8]
 
 
 def _edge_stats(ms, split, with_abstain):
@@ -333,12 +342,12 @@ def _score(seeds, A, P, plain_v, plain_t, rv, rt, uv, ut):
     # q channel: unit max, validation tail
     quv = units(rv, {"q": qv})["q"].reindex(uv.index).fillna(0).values
     qut = units(rt, {"q": qt})["q"].reindex(ut.index).fillna(0).values
-    fq = tail_fn(quv)
+    fq = tail_fn(quv, cap=True)
     q_v, q_t = fq(quv), fq(qut)
     # bulk novelty, two views, max recalibrated
     vo, to = bulk_novelty(rv, gv, nov_v, rt, gt, nov_t, uv.index, ut.index)
     vp, tp = bulk_novelty(rv, gv, nplv, rt, gt, nplt, uv.index, ut.index)
-    fm = tail_fn(np.maximum(vo, vp))
+    fm = tail_fn(np.maximum(vo, vp), cap=True)
     n_v, n_t = fm(np.maximum(vo, vp)), fm(np.maximum(to, tp))
     # novelty an entity already showed a review day earlier (>= LAG_H) was surfaced then: routine now
     n_v, n_t = lag_excess(uv.index.get_level_values("node").values, uv["t1"].values, n_v,
@@ -347,7 +356,7 @@ def _score(seeds, A, P, plain_v, plain_t, rv, rt, uv, ut):
     # plain decoder's own validation units; units it lacks score 0
     bv_all = pd.concat([plain_v[s] for s in seeds], axis=1).mean(1)
     bt_all = pd.concat([plain_t[s] for s in seeds], axis=1).mean(1)
-    fb = tail_fn(bv_all.values)
+    fb = tail_fn(bv_all.values, cap=True)
     b_v = fb(np.nan_to_num(bv_all.reindex(uv.index).values, nan=-1e9))
     b_t = fb(np.nan_to_num(bt_all.reindex(ut.index).values, nan=-1e9))
     S_v, S_t = b_v + q_v + n_v, b_t + q_t + n_t
