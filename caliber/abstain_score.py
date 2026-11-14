@@ -1,6 +1,8 @@
-"""Abstention-aware unit scorer (design frozen 2026-11-13, notes/2026-11-13_paper_direction.md;
-revisions: 1 majority-of-runs unanimity, 2 lagged novelty history, 3 abstention members (ABMEM),
-4 collapse guard (SPEC_WARM), 5 prevalence channel and four-channel sum (PREV)).
+"""Abstention-aware unit scorer, design rev. 6 (2026-11-14, notes/2026-11-14_generality.md).
+Kept only what the mechanism audit (12 detector-dataset pairs) showed to help: the plain detector's
+score, bulk novelty of consensus-abstained events, prevalence, abstention members, majority-of-runs
+consensus, the lagged novelty history. Removed: consensus surprise q, per-type (Mondrian) quantiles,
+the collapse guard (CALIBER_GUARD=1 restores it), the round-robin of two views.
 
 Inputs: per detector and dataset, two density-enabled training configurations with the same seeds:
   abstaining decoder   --abstain {"o":3} --density   (gambler's-loss abstention + novelty column)
@@ -9,35 +11,26 @@ and the plain decoder's default runs (group da39a3ee5e) for its surprise channel
 the plain+density runs when the default group lacks a seed). Members = seeds x saved epochs >= SNAP.
 
 Edge level (abstaining decoder, members of one seed = its snapshots):
-  collapse guard         (rev. 4) a seed whose abstaining run abstains on > COLLAPSE of validation
-                         events at every snapshot is replaced by its warm-up run (SPEC_WARM)
-  abstention members     (rev. 3) a snapshot votes on abstention only once it has learned to abstain:
-                         its validation abstention share >= ABMEM x the run's peak share over its
-                         snapshots (label-free; a slowly learning run would otherwise veto with its
-                         early snapshots). Surprise and novelty use all snapshots >= SNAP.
-  consensus abstention   every member of a seed abstains (p > THR); for pools of several seeds,
-                         a majority of seeds abstain unanimously (within-seed unanimity)
-  q_any                  mean surprise where no member abstains, else 0
-  q_hier (pools)         q_any within each seed, then the mean over seeds
+  abstention members     a snapshot votes on abstention only once it has learned to abstain: its
+                         validation abstention share >= ABMEM x the run's peak share over its
+                         snapshots (label-free). Novelty uses all snapshots >= SNAP.
+  consensus abstention   every voting snapshot of a run abstains (p > THR), in a majority of runs
 Unit level (unit = entity x batch window, max over its edges), each channel mapped to the
-validation tail -log P_val(X >= x) (exponential tail beyond the top 1%, no saturation):
-  b       plain decoder surprise (robust-z snapshot mean, as ensemble_stream)
-  q       q_any (one seed) / q_hier (several seeds)
-  mlvmax  bulk novelty inside the consensus-abstained set: per unit, over its abstained edges
-          deduplicated by (partner, edge type), k_L = # more novel than the level-L quantile of
-          validation abstained edges of the same type (Mondrian; global quantile for types with
-          < MIN_TYPE validation edges), sign test -log P(Binom(m, 1-L) >= k_L), max over LEVELS,
-          tail-calibrated on validation units; computed for the abstaining and the plain decoder's
-          novelty and combined by max (recalibrated), then taken relative to the entity's own history:
-          minus the largest novelty it showed in windows ending >= LAG_H (24 h) earlier (lag_excess)
-  rar     (rev. 5) prevalence of the unit's actions in the benign validation days (NoDoze-style):
-          sum of -log smoothed frequency of its PREV_K rarest distinct (source executable, event
-          type, target type) actions (see prevalence)
-Ranking (rev. 5, PREV=1): F = b + q + mlvmax + rar, a Fisher-style sum of four validation -log p;
-r = tail_F(F) is the scalar for the online controller. Per-day ratio to the plain detector over the
-12 development pairs: 0.39 (rev. 4: 0.52); PREV_K 3/5/10/all -> 0.44/0.39/0.39/0.43, 1 -> 0.64.
-(PREV=0, rev. 4: round-robin of S = b + q + mlvmax and C = b + q; r = max(tail_S(S), tail_C(C)).)
-Run-level interval: the scorer applied to each seed alone gives r_m; U = r + KAPPA sd_m(r_m)/sqrt(R).
+validation tail -log P_val(X >= x) (interpolated empirical tail, exponential beyond the top 1%):
+  b       plain detector's score (robust-z snapshot mean)
+  nov     bulk novelty inside the consensus-abstained set: per unit, over its abstained edges
+          deduplicated by (partner, edge type), k_L = # more novel than the L-quantile of validation
+          abstained edges, sign test -log P(Binom(m, 1-L) >= k_L), max over LEVELS; computed for the
+          abstaining and the plain decoder's novelty and combined by max (recalibrated), then taken
+          relative to the entity's own history: minus the largest novelty it showed in windows
+          ending >= LAG_H (24 h) earlier (lag_excess)
+  rar     prevalence of the unit's actions in the benign validation days (NoDoze-style): sum of
+          -log smoothed frequency of its PREV_K rarest distinct (source executable, event type,
+          target type) actions
+Score: F = b + nov + rar (Fisher-style sum of validation -log p); r = tail_F(F) for the controller.
+Cases: the partner (lineage key) is the other endpoint of the unit's most surprising edge under the
+plain detector. Run-level interval: the scorer on each seed alone gives r_m;
+U = r + KAPPA sd_m(r_m)/sqrt(R).
 """
 import os
 
@@ -53,7 +46,6 @@ SNAP = int(os.environ.get("CALIBER_SNAP", "3"))
 LAST = int(os.environ.get("CALIBER_LAST", "0"))   # > 0: only the last LAST saved snapshots of a run
 THR = 0.5
 LEVELS = (0.5, 0.75, 0.9, 0.95, 0.99)
-MIN_TYPE = 50
 SPEC_ABSTAIN = os.environ.get("CALIBER_ABSTAIN_SPEC", '{"o":3}')
 BASE_GROUP = "da39a3ee5e"
 KAPPA = 1.645
@@ -61,11 +53,7 @@ LAG_H = 24.0          # novelty history lag: one review day
 HOUR = 3600 * 10**9
 
 
-TAILCAP = int(os.environ.get("CALIBER_TAILCAP", "0"))
-# (rev. 5) prevalence channel and Fisher-style combination: score = b + q + nov + rar,
-# each a validation -log p; replaces the round-robin of S = b + q + nov and C = b + q.
-PREV = int(os.environ.get("CALIBER_PREV", "1"))
-PREV_K = int(os.environ.get("CALIBER_PREV_K", "5"))
+PREV_K = int(os.environ.get("CALIBER_PREV_K", "5"))   # prevalence: rarest distinct actions summed
 
 
 def prevalence(rv, rt, meta, uv_idx, ut_idx, k=None):
@@ -101,17 +89,12 @@ def prevalence(rv, rt, meta, uv_idx, ut_idx, k=None):
     return f(sv.reindex(uv_idx).fillna(0).values), f(per_unit(rt, kt).reindex(ut_idx).fillna(0).values)
 
 
-def tail_fn(ref, cap=False):
-    """-log P_ref(X >= x), with an exponential tail fitted to the top 1% beyond it. cap (with
-    TAILCAP): a channel claims at most the evidence its validation set resolves, -log 1/(n+1);
-    units beyond it are then ordered by the other channels of the sum."""
+def tail_fn(ref):
+    """-log P_ref(X >= x), with an exponential tail fitted to the top 1% beyond it."""
     r = np.sort(ref[np.isfinite(ref)])
     n = len(r)
     if n < 50:
         return lambda x: np.zeros(len(x))
-    if cap and TAILCAP:
-        f0, top = tail_fn(ref), float(np.log(n + 1.0))
-        return lambda x: np.minimum(f0(x), top)
     hi = r[int(0.99 * n):]
     lam = 1.0 / max(np.mean(hi - hi[0]), 1e-9)
     # empirical tail (n - #{ref < x} + 1)/(n + 1) at the validation values, linearly interpolated
@@ -186,7 +169,7 @@ def abstain_runs(runs, seeds, spec=None):
     default configuration is used, and the seeds that fell back to SPEC_WARM."""
     spec = SPEC_ABSTAIN if spec is None else spec
     ab = runs.get(spec, {})
-    if spec != '{"o":3}' or os.environ.get("CALIBER_GUARD", "1") == "0":
+    if spec != '{"o":3}' or os.environ.get("CALIBER_GUARD", "0") == "0":
         return {s: ab[s] for s in seeds if s in ab}, ()
     warm = runs.get(SPEC_WARM, {})
     out, fell = {}, []
@@ -224,11 +207,11 @@ def abstain_snapshots(m):
 
 def _variant():
     """Cache-key suffix for non-default members or abstaining configuration."""
-    if (SNAP, LAST, SPEC_ABSTAIN, ABMEM, TAILCAP, PREV, PREV_K) == (3, 0, '{"o":3}', 0.5, 0, 1, 5):
+    guard = os.environ.get("CALIBER_GUARD", "0")
+    if (SNAP, LAST, SPEC_ABSTAIN, ABMEM, PREV_K, guard) == (3, 0, '{"o":3}', 0.5, 5, "0"):
         return ""
     import hashlib
-    key = f"{SNAP}|{LAST}|{SPEC_ABSTAIN}|{ABMEM}" + (f"|cap{TAILCAP}" if TAILCAP else "") \
-        + (f"|prev{PREV}k{PREV_K}")
+    key = f"{SNAP}|{LAST}|{SPEC_ABSTAIN}|{ABMEM}|k{PREV_K}|g{guard}"
     return "_" + hashlib.md5(key.encode()).hexdigest()[:8]
 
 
@@ -295,8 +278,7 @@ def _sign_counts(ref, gate, nov, thr):
     d = d.groupby(["w", "node", "partner", "et"], as_index=False)["nov"].max()
     out = {"m": d.groupby(["w", "node"]).size()}
     for L in LEVELS:
-        t = d["et"].map(thr[L]).fillna(np.inf).values
-        out[L] = pd.Series((d["nov"].values > t).astype(np.int32)).groupby(
+        out[L] = pd.Series((d["nov"].values > thr[L]).astype(np.int32)).groupby(
             [d["w"].values, d["node"].values]).sum()
     o = pd.DataFrame(out)
     o.index.names = ["w", "node"]
@@ -309,14 +291,9 @@ def _mlv(df):
 
 
 def bulk_novelty(rv, gv, nv, rt, gt, nt, uv_idx, ut_idx):
-    """Multilevel sign test over consensus-abstained edges; (validation, test) unit tails."""
-    dv = pd.DataFrame({"et": rv["edge_type"].values[gv], "nov": nv[gv]})
-    thr = {}
-    for L in LEVELS:
-        g = dv.groupby("et")["nov"].quantile(L)
-        cnt = dv.groupby("et").size()
-        glob = np.quantile(nv[gv], L) if gv.any() else np.inf
-        thr[L] = {t: (g[t] if cnt[t] >= MIN_TYPE else glob) for t in g.index}
+    """Multilevel sign test over consensus-abstained edges; (validation, test) unit tails. Level-L
+    threshold: the L-quantile of the novelty of validation consensus-abstained edges."""
+    thr = {L: (np.quantile(nv[gv], L) if gv.any() else np.inf) for L in LEVELS}
     sv = _sign_counts(rv, gv, nv, thr).reindex(uv_idx).fillna(0)
     st = _sign_counts(rt, gt, nt, thr).reindex(ut_idx).fillna(0)
     mv, mt = _mlv(sv), _mlv(st)
@@ -368,36 +345,23 @@ def plain_unit_scores(ms):
 
 
 # ----------------------------------------------------------------------------- scorer
-def _score(seeds, A, P, plain_v, plain_t, rv, rt, uv, ut, rar=None):
-    """Frozen scorer on the seed pool `seeds`. Returns dict of (val, test) unit arrays. rar: the
-    prevalence channel (validation, test) when PREV is on."""
+def _score(seeds, A, P, plain_v, plain_t, rv, rt, uv, ut, rar):
+    """Scorer on the seed pool `seeds`: F = b + nov + rar (validation -log p each), r = tail_F(F).
+    Returns dict of (val, test) unit arrays."""
     def pool(stats):
         ss = [stats[s] for s in seeds]
-        # gate of the bulk-novelty test: one seed = unanimity over its snapshots; pooled = a majority
-        # of runs abstain unanimously (flat unanimity over all members shrinks the set as runs are
-        # added: pooled ATLAS rr 68.4 -> 39.9, others unchanged)
+        # consensus abstention: unanimous within a run (all its voting snapshots), in a majority of
+        # runs (flat unanimity over all members would shrink the set as runs are added)
         all_ = np.mean([x["all"] for x in ss], 0) >= 0.5
-        n = sum(x["n"] for x in ss)
-        nov = sum(x["nov"] for x in ss) / n
-        if len(ss) == 1:
-            x = ss[0]
-            q = np.where(x["any"], 0.0, x["q"] / x["n"])
-        else:                                        # q_hier
-            q = np.mean([np.where(x["any"], 0.0, x["q"] / x["n"]) for x in ss], 0)
-        return all_, q, nov
-    gv, qv, nov_v = pool(A["val"])
-    gt, qt, nov_t = pool(A["test"])
+        return all_, sum(x["nov"] for x in ss) / sum(x["n"] for x in ss)
+    gv, nov_v = pool(A["val"])
+    gt, nov_t = pool(A["test"])
     nplv = sum(P["val"][s]["nov"] for s in seeds) / sum(P["val"][s]["n"] for s in seeds)
     nplt = sum(P["test"][s]["nov"] for s in seeds) / sum(P["test"][s]["n"] for s in seeds)
-    # q channel: unit max, validation tail
-    quv = units(rv, {"q": qv})["q"].reindex(uv.index).fillna(0).values
-    qut = units(rt, {"q": qt})["q"].reindex(ut.index).fillna(0).values
-    fq = tail_fn(quv, cap=True)
-    q_v, q_t = fq(quv), fq(qut)
-    # bulk novelty, two views, max recalibrated
+    # bulk novelty of the consensus-abstained events, in both decoders' representations (max)
     vo, to = bulk_novelty(rv, gv, nov_v, rt, gt, nov_t, uv.index, ut.index)
     vp, tp = bulk_novelty(rv, gv, nplv, rt, gt, nplt, uv.index, ut.index)
-    fm = tail_fn(np.maximum(vo, vp), cap=True)
+    fm = tail_fn(np.maximum(vo, vp))
     n_v, n_t = fm(np.maximum(vo, vp)), fm(np.maximum(to, tp))
     # novelty an entity already showed a review day earlier (>= LAG_H) was surfaced then: routine now
     n_v, n_t = lag_excess(uv.index.get_level_values("node").values, uv["t1"].values, n_v,
@@ -406,26 +370,14 @@ def _score(seeds, A, P, plain_v, plain_t, rv, rt, uv, ut, rar=None):
     # plain decoder's own validation units; units it lacks score 0
     bv_all = pd.concat([plain_v[s] for s in seeds], axis=1).mean(1)
     bt_all = pd.concat([plain_t[s] for s in seeds], axis=1).mean(1)
-    fb = tail_fn(bv_all.values, cap=True)
+    fb = tail_fn(bv_all.values)
     b_v = fb(np.nan_to_num(bv_all.reindex(uv.index).values, nan=-1e9))
     b_t = fb(np.nan_to_num(bt_all.reindex(ut.index).values, nan=-1e9))
-    S_v, S_t = b_v + q_v + n_v, b_t + q_t + n_t
-    C_v, C_t = b_v + q_v, b_t + q_t
-    fS, fC = tail_fn(S_v), tail_fn(C_v)
-    if rar is not None:
-        # rev. 5: Fisher-style sum of the four validation -log p; r is its validation tail
-        F_v, F_t = S_v + rar[0], S_t + rar[1]
-        fF = tail_fn(F_v)
-        r_v, r_t = fF(F_v), fF(F_t)
-    else:
-        r_v = np.maximum(fS(S_v), fC(C_v))
-        r_t = np.maximum(fS(S_t), fC(C_t))
-    out = {"b": (b_v, b_t), "q": (q_v, q_t), "nov": (n_v, n_t), "S3": (S_v, S_t),
-           "C": (C_v, C_t), "r": (r_v, r_t), "cons_share_test": float(gt.mean())}
-    if rar is not None:
-        out["rar"] = rar
-        out["F"] = (F_v, F_t)
-    return out
+    # Fisher-style sum of the three validation -log p; r is its validation tail (same order)
+    F_v, F_t = b_v + n_v + rar[0], b_t + n_t + rar[1]
+    fF = tail_fn(F_v)
+    return {"b": (b_v, b_t), "nov": (n_v, n_t), "rar": rar, "F": (F_v, F_t),
+            "r": (fF(F_v), fF(F_t)), "cons_share_test": float(gt.mean())}
 
 
 def stream(artifact_dir, system, dataset, labels, seeds=(0, 1, 2), base_group=BASE_GROUP,
@@ -458,18 +410,14 @@ def stream(artifact_dir, system, dataset, labels, seeds=(0, 1, 2), base_group=BA
     if verbose:
         print(f"  abstain-score {system}/{dataset}: seeds {seeds}, edges val {len(rv)} test {len(rt)}",
               flush=True)
-    # units from the abstaining decoder's edges; the partner (lineage key) is the other endpoint
-    # of the unit's most surprising edge, surprise = mean over the members that do not abstain
-    def q_nonab(stats):
-        qk = sum(stats[s]["qk"] for s in seeds)
-        nk = sum(stats[s]["nk"].astype(np.int32) for s in seeds)
-        return np.where(nk > 0, qk / np.maximum(nk, 1), 0.0)
-    uv, ut = units(rv, {"q": q_nonab(A["val"])}), units(rt, {"q": q_nonab(A["test"])})
+    # units; the partner (lineage key) is the other endpoint of the unit's most surprising edge under
+    # the plain detector (mean edge surprise over its members)
+    def plain_q(stats):
+        return sum(stats[s]["q"] for s in seeds) / sum(stats[s]["n"] for s in seeds)
+    uv, ut = units(rv, {"q": plain_q(P["val"])}), units(rt, {"q": plain_q(P["test"])})
     plain_v, plain_t = plain_unit_scores(plain_src)
-    rar = None
-    if PREV:
-        _, meta = data.labels_for(ab[seeds[0]], artifact_dir)
-        rar = prevalence(rv, rt, meta, uv.index, ut.index)
+    _, meta = data.labels_for(ab[seeds[0]], artifact_dir)
+    rar = prevalence(rv, rt, meta, uv.index, ut.index)
     pooled = _score(seeds, A, P, plain_v, plain_t, rv, rt, uv, ut, rar)
     per = [_score((s,), A, P, plain_v, plain_t, rv, rt, uv, ut, rar) for s in seeds] if len(seeds) > 1 \
         else [pooled]
@@ -493,8 +441,8 @@ def stream(artifact_dir, system, dataset, labels, seeds=(0, 1, 2), base_group=BA
         "t_val": uv["t1"].values, "node_val": uv.index.get_level_values("node").values,
         "partner_val": uv["partner"].values,
         "seeds": seeds,
-        "views": {k: pooled[k] for k in ("b", "q", "nov", "S3", "C", "r", "rar", "F") if k in pooled},
-        "views_per_seed": [{k: p[k] for k in ("b", "S3", "C", "r")} for p in per],
+        "views": {k: pooled[k] for k in ("b", "nov", "rar", "F", "r")},
+        "views_per_seed": [{k: p[k] for k in ("b", "nov", "F", "r")} for p in per],
     }
 
 
@@ -555,13 +503,13 @@ def as_plain(st):
 
 
 def scored_stream(kind, artifact_dir, system, dataset, labels, seeds=(0, 1, 2)):
-    """kind: "abstain"/"abstain_dual" (frozen scorer) or "plain3" (b alone on the same units). The scored stream
+    """kind: "abstain" (the scorer) or "plain3" (b alone on the same units). The scored stream
     is cached under <artifact_dir>/caliber/cache (labels are re-applied on load)."""
     import pickle
     cdir = os.path.join(artifact_dir, "caliber", "cache")
     _, fell = abstain_runs(density_runs(artifact_dir, system, dataset), seeds)
     wtag = f"_w{'-'.join(map(str, fell))}" if fell else ""
-    cp = os.path.join(cdir, f"abstain_score_v6_{system}_{dataset}_s{'-'.join(map(str, seeds))}"
+    cp = os.path.join(cdir, f"abstain_score_v7_{system}_{dataset}_s{'-'.join(map(str, seeds))}"
                             f"{_variant()}{wtag}.pkl")
     st = None
     if os.path.exists(cp):
@@ -582,17 +530,3 @@ def scored_stream(kind, artifact_dir, system, dataset, labels, seeds=(0, 1, 2)):
         st["U" + sfx] = st["S" + sfx] + KAPPA * sem
     return as_plain(st) if kind == "plain3" else st
 
-
-def dual_views(st):
-    """The two round-robin views (S = b + q + mlvmax, C = b + q) for the online form with one
-    controller per view: per view (S_test, S_val, U_test, U_val), U = view + KAPPA sd_seeds/sqrt(R)."""
-    out = []
-    for name in ("S3", "C"):
-        sv, stt = st["views"][name]
-        Zv = np.vstack([p[name][0] for p in st["views_per_seed"]])
-        Zt = np.vstack([p[name][1] for p in st["views_per_seed"]])
-        R = Zt.shape[0]
-        sem_v = Zv.std(0, ddof=0) / np.sqrt(R) if R > 1 else 0.0
-        sem_t = Zt.std(0, ddof=0) / np.sqrt(R) if R > 1 else 0.0
-        out.append((stt, sv, stt + KAPPA * sem_t, sv + KAPPA * sem_v))
-    return out

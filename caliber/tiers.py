@@ -367,7 +367,7 @@ def main():
                     help="only all-to-triage and B_auto=0.25 (eta_act=1.0)")
     ap.add_argument("--single_all", action="store_true",
                     help="single-run rules for every member (mean and range), not only member 0")
-    ap.add_argument("--scorer", default="ensemble", choices=["ensemble", "abstain", "abstain_dual", "plain3"],
+    ap.add_argument("--scorer", default="ensemble", choices=["ensemble", "abstain", "plain3"],
                     help="unit scores: ensemble (default) or caliber.abstain_score (S = pooled "
                          "scorer, Z = per-seed scorer, so the interval is over training runs)")
     ap.add_argument("--seeds", default="0,1,2", help="seeds for --scorer abstain/plain3")
@@ -384,7 +384,7 @@ def main():
         st = ensemble_stream(members, labels, cache_dir=cache)
     else:
         from caliber import abstain_score
-        st = abstain_score.scored_stream(args.scorer.replace("_dual", ""), args.artifact_dir, args.system, args.dataset,
+        st = abstain_score.scored_stream(args.scorer, args.artifact_dir, args.system, args.dataset,
                                          labels, seeds=tuple(int(s) for s in args.seeds.split(",")))
     tz = labels.get("timezone", "US/Eastern")
     B = args.budget
@@ -397,13 +397,6 @@ def main():
     M = st["Z"].shape[0]
     sem = np.nan_to_num(np.nanstd(st["Z"], 0) / np.sqrt(M))
     sem_val = np.nan_to_num(np.nanstd(st["Z_val"], 0) / np.sqrt(M))
-    dual = None
-    if args.scorer == "abstain_dual":
-        from caliber import abstain_score as _asc
-        dual = _asc.dual_views(st)
-        act_t, act_v = dual[0][0], dual[0][1]
-        if args.act_on == "plain":
-            act_t, act_v = st["views"]["b"][1], st["views"]["b"][0]
     rules = []
     for r_ in args.rules.split(","):    # single-run rules: every member, reported as mean/range
         rules += [f"{r_}#{m}" for m in range(M)] if r_.startswith("single_run") and args.single_all else [r_]
@@ -451,35 +444,14 @@ def main():
                 rng = np.random.default_rng(0)
                 ka = max(int((b_auto or 1) * nvd), 1)
                 q_act0 = float(np.sort(cal_act)[-ka])
-                if dual is not None and base.startswith("ensemble_upper") and not static:
-                    # online round-robin: one review controller per view (B/K each, on the
-                    # view's upper bound); the act tier runs on view 0 (S) with its mean
-                    from caliber.multiview import replay_views
-                    K = len(dual)
-                    q0s = [case_threshold(Uv, st["t_val"], lin_val, B / K, nvd) for *_, Uv in dual]
-                    etas = [review_step(Uv[np.isfinite(Uv)], B / K) for *_, Uv in dual]
-                    seen_d = set()
-                    for (*_, Uv), qk in zip(dual, q0s):
-                        seen_d |= set(exe_val[np.isfinite(Uv) & (Uv >= qk)].tolist())
-                    act = None
-                    if b_auto is not None:
-                        v0 = act_v[np.isfinite(act_v)]
-                        act = {"pi": 2.0, "audit": audit, "eta_act": (eta_a or 0.02) * (float(np.std(v0)) or 1.0),
-                               "q_act0": float(np.sort(v0)[-ka]), "B_auto": b_auto, "S_act": act_t,
-                               "act_key": exe_key if "_novel" in base else None,
-                               "act_seen": seen_d if "_novel" in base else None}
-                    case_of, cases = replay_views([d[2] for d in dual], st["t1"], st["w"], st["y"], lin,
-                                                  B, q0s, etas, rng, act_view=0, act=act,
-                                                  flood_cap=None, bucket_h=BUCKET_H)
-                else:
-                    case_of, cases = replay_tiers(
-                        S, st["t1"], st["w"], st["y"], lin, B, q0, 0.0 if static else review_step(cal, B),
-                        2.0, audit if b_auto is not None else 0.0,
-                        (eta_a or 0.02) * sd, q_act0 if b_auto is not None else np.inf, rng,
-                        B_auto=b_auto, S_act=S_act, flood_cap=None,
-                        bucket_h=None if static else BUCKET_H,
-                        act_key=exe_key if "_novel" in base else None,
-                        act_seen=seen_val if "_novel" in base else None)
+                case_of, cases = replay_tiers(
+                    S, st["t1"], st["w"], st["y"], lin, B, q0, 0.0 if static else review_step(cal, B),
+                    2.0, audit if b_auto is not None else 0.0,
+                    (eta_a or 0.02) * sd, q_act0 if b_auto is not None else np.inf, rng,
+                    B_auto=b_auto, S_act=S_act, flood_cap=None,
+                    bucket_h=None if static else BUCKET_H,
+                    act_key=exe_key if "_novel" in base else None,
+                    act_seen=seen_val if "_novel" in base else None)
                 r = evaluate(st, case_of, cases, B, tz, labels.get("attacks"))
                 fa = [c for c in cases if c["tier"] == "A" and not c["y"]]
                 nd = max(len(np.unique(day_of(st["t1"], tz))), 1)

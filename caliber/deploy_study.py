@@ -297,7 +297,7 @@ def main():
     ap.add_argument("--tag", default="", help="suffix for the report file")
     ap.add_argument("--detector", default="model", choices=["model", "allowlist"],
                     help="allowlist: executable-novelty baseline on the same units (Guerra et al.)")
-    ap.add_argument("--scorer", default="ensemble", choices=["ensemble", "abstain", "abstain_dual", "plain3"],
+    ap.add_argument("--scorer", default="ensemble", choices=["ensemble", "abstain", "plain3"],
                     help="ensemble: robust-z mean of the group's runs (default); abstain: the "
                          "abstention-aware scorer (caliber.abstain_score) on density runs; plain3: "
                          "its plain-surprise channel alone on the same units and seeds")
@@ -312,7 +312,7 @@ def main():
         st = ensemble_stream(members, labels, cache_dir=cache)
     else:
         from caliber import abstain_score
-        st = abstain_score.scored_stream(args.scorer.replace("_dual", ""), args.artifact_dir, args.system, args.dataset,
+        st = abstain_score.scored_stream(args.scorer, args.artifact_dir, args.system, args.dataset,
                                          labels, seeds=tuple(int(s) for s in args.seeds.split(",")))
     tz = labels.get("timezone", "US/Eastern")
     keys, has_lin = case_keys(st, args.artifact_dir, args.dataset, meta)
@@ -353,12 +353,6 @@ def main():
             else:
                 U, U_val = S, S_val
             views = None
-            if args.scorer == "abstain_dual":       # one controller per round-robin view
-                if len(subset) == M and M > 1:
-                    views = [(Ut, Uv) for _, _, Ut, Uv in abstain_score.dual_views(st)]
-                else:
-                    p = st["views_per_seed"][subset[0]]
-                    views = [(p["S3"][1], p["S3"][0]), (p["C"][1], p["C"][0])]
             key = tuple(subset)
             if key not in cand_cache:
                 cand_cache[key] = candidate_cases(S, st, keys, labels["attacks"], tz)
