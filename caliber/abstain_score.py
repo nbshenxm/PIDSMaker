@@ -114,13 +114,20 @@ def tail_fn(ref, cap=False):
         return lambda x: np.minimum(f0(x), top)
     hi = r[int(0.99 * n):]
     lam = 1.0 / max(np.mean(hi - hi[0]), 1e-9)
+    # empirical tail (n - #{ref < x} + 1)/(n + 1) at the validation values, linearly interpolated
+    # between them (rev. 5b): a step function would tie every test score that falls between two
+    # consecutive validation scores (tens of test units per validation unit), and ties are broken
+    # at random downstream. Beyond the largest validation score: 1/(n+1) decaying at the fitted rate.
+    u, first = np.unique(r, return_index=True)
+    pu = (n - first + 1.0) / (n + 1.0)
 
-    def f(x):
+    def f(x):                                        # in log space: no underflow, no top ties
         x = np.asarray(x, np.float64)
-        p = (n - np.searchsorted(r, x, side="left") + 1.0) / (n + 1.0)
-        ext = 0.01 * np.exp(-lam * np.maximum(x - hi[0], 0))
-        p = np.where(x > hi[0], np.minimum(p, ext), p)
-        return -np.log(np.maximum(p, 1e-300))
+        lp = np.log(np.interp(x, u, pu))
+        lp = np.where(x > u[-1], -lam * (x - u[-1]) - np.log(n + 1.0), lp)
+        lext = np.log(0.01) - lam * np.maximum(x - hi[0], 0)
+        lp = np.where(x > hi[0], np.minimum(lp, lext), lp)
+        return -lp
     return f
 
 
@@ -554,7 +561,7 @@ def scored_stream(kind, artifact_dir, system, dataset, labels, seeds=(0, 1, 2)):
     cdir = os.path.join(artifact_dir, "caliber", "cache")
     _, fell = abstain_runs(density_runs(artifact_dir, system, dataset), seeds)
     wtag = f"_w{'-'.join(map(str, fell))}" if fell else ""
-    cp = os.path.join(cdir, f"abstain_score_v5_{system}_{dataset}_s{'-'.join(map(str, seeds))}"
+    cp = os.path.join(cdir, f"abstain_score_v6_{system}_{dataset}_s{'-'.join(map(str, seeds))}"
                             f"{_variant()}{wtag}.pkl")
     st = None
     if os.path.exists(cp):
