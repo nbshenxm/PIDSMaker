@@ -58,6 +58,43 @@ HOUR = 3600 * 10**9
 
 
 TAILCAP = int(os.environ.get("CALIBER_TAILCAP", "0"))
+# (rev. 5, candidate) prevalence channel and Fisher-style combination: score = b + q + nov + rar,
+# each a validation -log p; replaces the round-robin of S = b + q + nov and C = b + q.
+PREV = int(os.environ.get("CALIBER_PREV", "0"))
+PREV_K = int(os.environ.get("CALIBER_PREV_K", "5"))
+
+
+def prevalence(rv, rt, meta, uv_idx, ut_idx, k=None):
+    """Prevalence of a unit's actions in the benign validation days (NoDoze-style rarity): an action
+    is (source executable, or source type when the executable is unknown; event type; target type);
+    its rarity is -log of its smoothed validation frequency; a unit scores the sum of the rarities of
+    its k rarest distinct actions. Returns validation-tail -log p for (validation, test) units."""
+    k = PREV_K if k is None else k
+    typ = pd.Series(meta["type"].astype(str).values, index=meta["node"].astype(np.int64).values)
+    path = pd.Series(meta["path"].fillna("").astype(str).values, index=meta["node"].astype(np.int64).values)
+    path = path[typ.reindex(path.index).values == "subject"]
+
+    def keys(r):
+        s, d = r["srcnode"].astype(np.int64), r["dstnode"].astype(np.int64)
+        sl = s.map(path).fillna("")
+        sl = np.where(sl.values != "", sl.values, "T:" + s.map(typ).fillna("?").values)
+        return pd.Series(sl).astype(str) + "|" + r["edge_type"].astype(str).values + "|" + d.map(typ).fillna("?").values
+
+    kv, kt = keys(rv), keys(rt)
+    cnt = kv.value_counts()
+    n, V = len(kv), len(cnt) + 1
+
+    def per_unit(r, kk):
+        rr = -np.log((kk.map(cnt).fillna(0).values + 1.0) / (n + V))
+        parts = [pd.DataFrame({"w": r["b"].values, "node": r[c].values, "k": kk.values, "r": rr})
+                 for c in ("srcnode", "dstnode")]
+        d = pd.concat(parts, ignore_index=True).drop_duplicates(["w", "node", "k"])
+        d = d.sort_values("r", ascending=False).groupby(["w", "node"]).head(k)
+        return d.groupby(["w", "node"])["r"].sum()
+
+    sv = per_unit(rv, kv)
+    f = tail_fn(sv.values)
+    return f(sv.reindex(uv_idx).fillna(0).values), f(per_unit(rt, kt).reindex(ut_idx).fillna(0).values)
 
 
 def tail_fn(ref, cap=False):
@@ -176,10 +213,11 @@ def abstain_snapshots(m):
 
 def _variant():
     """Cache-key suffix for non-default members or abstaining configuration."""
-    if (SNAP, LAST, SPEC_ABSTAIN, ABMEM, TAILCAP) == (3, 0, '{"o":3}', 0.5, 0):
+    if (SNAP, LAST, SPEC_ABSTAIN, ABMEM, TAILCAP, PREV) == (3, 0, '{"o":3}', 0.5, 0, 0):
         return ""
     import hashlib
-    key = f"{SNAP}|{LAST}|{SPEC_ABSTAIN}|{ABMEM}" + (f"|cap{TAILCAP}" if TAILCAP else "")
+    key = f"{SNAP}|{LAST}|{SPEC_ABSTAIN}|{ABMEM}" + (f"|cap{TAILCAP}" if TAILCAP else "") \
+        + (f"|prev{PREV_K}" if PREV else "")
     return "_" + hashlib.md5(key.encode()).hexdigest()[:8]
 
 
@@ -319,8 +357,9 @@ def plain_unit_scores(ms):
 
 
 # ----------------------------------------------------------------------------- scorer
-def _score(seeds, A, P, plain_v, plain_t, rv, rt, uv, ut):
-    """Frozen scorer on the seed pool `seeds`. Returns dict of (val, test) unit arrays."""
+def _score(seeds, A, P, plain_v, plain_t, rv, rt, uv, ut, rar=None):
+    """Frozen scorer on the seed pool `seeds`. Returns dict of (val, test) unit arrays. rar: the
+    prevalence channel (validation, test) when PREV is on."""
     def pool(stats):
         ss = [stats[s] for s in seeds]
         # gate of the bulk-novelty test: one seed = unanimity over its snapshots; pooled = a majority
@@ -362,10 +401,20 @@ def _score(seeds, A, P, plain_v, plain_t, rv, rt, uv, ut):
     S_v, S_t = b_v + q_v + n_v, b_t + q_t + n_t
     C_v, C_t = b_v + q_v, b_t + q_t
     fS, fC = tail_fn(S_v), tail_fn(C_v)
-    r_v = np.maximum(fS(S_v), fC(C_v))
-    r_t = np.maximum(fS(S_t), fC(C_t))
-    return {"b": (b_v, b_t), "q": (q_v, q_t), "nov": (n_v, n_t), "S3": (S_v, S_t),
-            "C": (C_v, C_t), "r": (r_v, r_t), "cons_share_test": float(gt.mean())}
+    if rar is not None:
+        # rev. 5: Fisher-style sum of the four validation -log p; r is its validation tail
+        F_v, F_t = S_v + rar[0], S_t + rar[1]
+        fF = tail_fn(F_v)
+        r_v, r_t = fF(F_v), fF(F_t)
+    else:
+        r_v = np.maximum(fS(S_v), fC(C_v))
+        r_t = np.maximum(fS(S_t), fC(C_t))
+    out = {"b": (b_v, b_t), "q": (q_v, q_t), "nov": (n_v, n_t), "S3": (S_v, S_t),
+           "C": (C_v, C_t), "r": (r_v, r_t), "cons_share_test": float(gt.mean())}
+    if rar is not None:
+        out["rar"] = rar
+        out["F"] = (F_v, F_t)
+    return out
 
 
 def stream(artifact_dir, system, dataset, labels, seeds=(0, 1, 2), base_group=BASE_GROUP,
@@ -406,8 +455,12 @@ def stream(artifact_dir, system, dataset, labels, seeds=(0, 1, 2), base_group=BA
         return np.where(nk > 0, qk / np.maximum(nk, 1), 0.0)
     uv, ut = units(rv, {"q": q_nonab(A["val"])}), units(rt, {"q": q_nonab(A["test"])})
     plain_v, plain_t = plain_unit_scores(plain_src)
-    pooled = _score(seeds, A, P, plain_v, plain_t, rv, rt, uv, ut)
-    per = [_score((s,), A, P, plain_v, plain_t, rv, rt, uv, ut) for s in seeds] if len(seeds) > 1 \
+    rar = None
+    if PREV:
+        _, meta = data.labels_for(ab[seeds[0]], artifact_dir)
+        rar = prevalence(rv, rt, meta, uv.index, ut.index)
+    pooled = _score(seeds, A, P, plain_v, plain_t, rv, rt, uv, ut, rar)
+    per = [_score((s,), A, P, plain_v, plain_t, rv, rt, uv, ut, rar) for s in seeds] if len(seeds) > 1 \
         else [pooled]
     Zv = np.vstack([p["r"][0] for p in per])
     Zt = np.vstack([p["r"][1] for p in per])
@@ -429,7 +482,7 @@ def stream(artifact_dir, system, dataset, labels, seeds=(0, 1, 2), base_group=BA
         "t_val": uv["t1"].values, "node_val": uv.index.get_level_values("node").values,
         "partner_val": uv["partner"].values,
         "seeds": seeds,
-        "views": {k: pooled[k] for k in ("b", "q", "nov", "S3", "C", "r")},
+        "views": {k: pooled[k] for k in ("b", "q", "nov", "S3", "C", "r", "rar", "F") if k in pooled},
         "views_per_seed": [{k: p[k] for k in ("b", "S3", "C", "r")} for p in per],
     }
 
