@@ -186,7 +186,7 @@ def abstain_runs(runs, seeds, spec=None):
     default configuration is used, and the seeds that fell back to SPEC_WARM."""
     spec = SPEC_ABSTAIN if spec is None else spec
     ab = runs.get(spec, {})
-    if spec != '{"o":3}':
+    if spec != '{"o":3}' or os.environ.get("CALIBER_GUARD", "1") == "0":
         return {s: ab[s] for s in seeds if s in ab}, ()
     warm = runs.get(SPEC_WARM, {})
     out, fell = {}, []
