@@ -285,9 +285,21 @@ def _sign_counts(ref, gate, nov, thr):
     return o
 
 
+def _log_tail(k, m, p):
+    """log P(Binom(m, p) >= k), finite: where the survival function underflows (many interactions,
+    nearly all beyond a high level), its leading term, log P(Binom(m, p) = k), computed in log space,
+    which dominates the tail there."""
+    with np.errstate(divide="ignore"):
+        lt = binom.logsf(k - 1, m, p)
+    bad = ~np.isfinite(lt)
+    if bad.any():
+        lt = np.where(bad, binom.logpmf(k, m, p), lt)
+    return lt
+
+
 def _mlv(df):
     m = df["m"].values
-    return np.max([np.where(m > 0, -binom.logsf(df[L].values - 1, m, 1 - L), 0.0) for L in LEVELS], 0)
+    return np.max([np.where(m > 0, -_log_tail(df[L].values, m, 1 - L), 0.0) for L in LEVELS], 0)
 
 
 def bulk_novelty(rv, gv, nv, rt, gt, nt, uv_idx, ut_idx):
@@ -509,7 +521,7 @@ def scored_stream(kind, artifact_dir, system, dataset, labels, seeds=(0, 1, 2)):
     cdir = os.path.join(artifact_dir, "caliber", "cache")
     _, fell = abstain_runs(density_runs(artifact_dir, system, dataset), seeds)
     wtag = f"_w{'-'.join(map(str, fell))}" if fell else ""
-    cp = os.path.join(cdir, f"abstain_score_v7_{system}_{dataset}_s{'-'.join(map(str, seeds))}"
+    cp = os.path.join(cdir, f"abstain_score_v8_{system}_{dataset}_s{'-'.join(map(str, seeds))}"
                             f"{_variant()}{wtag}.pkl")
     st = None
     if os.path.exists(cp):
