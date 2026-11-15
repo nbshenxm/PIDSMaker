@@ -71,6 +71,7 @@ USE_ABSTAIN = NOV_GATE != "all" or "a" in NOV_VIEWS   # rev-6 ablations read the
 # interactions above the validation 0.9 quantile). HIST: "excess" (novelty minus the entity's earlier
 # maximum, default) or "suppress" (no novelty credit once the entity showed validation-top-1% novelty
 # >= LAG_H earlier).
+B_SRC = os.environ.get("CALIBER_B_SRC", "base")
 NOV_STAT = os.environ.get("CALIBER_NOV_STAT", "sign")
 HIST = os.environ.get("CALIBER_HIST", "excess")
 
@@ -240,6 +241,8 @@ def _variant():
         key += f"|lag{LAG_H:g}|L{','.join(f'{x:g}' for x in LEVELS)}"
     if (NOV_STAT, HIST) != ("sign", "excess"):                       # simple alternatives
         key += f"|{NOV_STAT}|{HIST}"
+    if B_SRC != "base":
+        key += f"|b{B_SRC}"
     return "_" + hashlib.md5(key.encode()).hexdigest()[:8]
 
 
@@ -476,7 +479,9 @@ def stream(artifact_dir, system, dataset, labels, seeds=(0, 1, 2), base_group=BA
     pl = {s: pl[s] for s in seeds}
     base = {m["seed"]: m for m in data.load_manifests(artifact_dir, system, dataset, base_group)
             if m["seed"] in seeds and m.get("test_epochs")}
-    plain_src = {s: base.get(s, pl[s]) for s in seeds}
+    # b from the default runs (group BASE_GROUP), or, with CALIBER_B_SRC=density, from the same
+    # --density runs that give novelty (one training run per seed, as a deployment would have)
+    plain_src = {s: pl[s] if B_SRC == "density" else base.get(s, pl[s]) for s in seeds}
     A, P = {}, {}
     for split in ("val", "test"):
         r_p, P[split] = _edge_stats(pl, split, False)
