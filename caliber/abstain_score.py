@@ -337,22 +337,23 @@ def _mlv(df):
     return np.max([np.where(m > 0, -_log_tail(df[L].values, m, 1 - L), 0.0) for L in LEVELS], 0)
 
 
-def _alt_stat(ref, gate, nov, t90):
+def _alt_stat(ref, gate, nov, t90, stat=None):
     """Unit novelty under a simple alternative to the sign test (NOV_STAT), over the same
     deduplicated interactions (partner, edge type) of the unit."""
+    stat = NOV_STAT if stat is None else stat
     parts = [pd.DataFrame({"w": ref["b"].values[gate], "node": ref[nc].values[gate],
                            "partner": ref[pc].values[gate], "et": ref["edge_type"].values[gate],
                            "nov": nov[gate]}) for nc, pc in (("srcnode", "dstnode"), ("dstnode", "srcnode"))]
     d = pd.concat(parts, ignore_index=True).groupby(["w", "node", "partner", "et"], as_index=False)["nov"].max()
     g = d.groupby(["w", "node"])["nov"]
-    if NOV_STAT == "max":
+    if stat == "max":
         s = g.max()
-    elif NOV_STAT == "topk":
+    elif stat == "topk":
         s = d.sort_values("nov", ascending=False).groupby(["w", "node"]).head(5).groupby(["w", "node"])["nov"].mean()
-    elif NOV_STAT == "frac":
+    elif stat == "frac":
         s = (d.assign(x=(d["nov"].values > t90).astype(np.float64)).groupby(["w", "node"])["x"].mean())
     else:
-        raise ValueError(NOV_STAT)
+        raise ValueError(stat)
     s.index.names = ["w", "node"]
     return s
 
@@ -360,7 +361,7 @@ def _alt_stat(ref, gate, nov, t90):
 def bulk_novelty(rv, gv, nv, rt, gt, nt, uv_idx, ut_idx):
     """Multilevel sign test over consensus-abstained edges; (validation, test) unit tails. Level-L
     threshold: the L-quantile of the novelty of validation consensus-abstained edges."""
-    if NOV_STAT != "sign":
+    if NOV_STAT not in ("sign", "signmax"):
         t90 = np.quantile(nv[gv], 0.9) if gv.any() else np.inf
         av = _alt_stat(rv, gv, nv, t90).reindex(uv_idx).fillna(0).values
         at = _alt_stat(rt, gt, nt, t90).reindex(ut_idx).fillna(0).values
@@ -376,6 +377,16 @@ def bulk_novelty(rv, gv, nv, rt, gt, nt, uv_idx, ut_idx):
         st.loc[_ATTACK_MASK, "m"] = np.round(st.loc[_ATTACK_MASK, "m"].values * (1.0 + DILUTE))
     mv, mt = _mlv(sv), _mlv(st)
     f = tail_fn(mv)
+    if NOV_STAT == "signmax":
+        # the more alarming of bulk evidence and the unit's most novel interaction (calibrated
+        # tails, max recalibrated): padding a unit with familiar interactions dilutes the bulk test
+        # but cannot lower its most novel interaction
+        pv = _alt_stat(rv, gv, nv, None, "max").reindex(uv_idx).fillna(0).values
+        pt = _alt_stat(rt, gt, nt, None, "max").reindex(ut_idx).fillna(0).values
+        fp = tail_fn(pv)
+        cv, ct = np.maximum(f(mv), fp(pv)), np.maximum(f(mt), fp(pt))
+        fc = tail_fn(cv)
+        return fc(cv), fc(ct)
     return f(mv), f(mt)
 
 
