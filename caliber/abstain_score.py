@@ -1,8 +1,13 @@
-"""Abstention-aware unit scorer, design rev. 6 (2026-11-14, notes/2026-11-14_generality.md).
-Kept only what the mechanism audit (12 detector-dataset pairs) showed to help: the plain detector's
-score, bulk novelty of consensus-abstained events, prevalence, abstention members, majority-of-runs
-consensus, the lagged novelty history. Removed: consensus surprise q, per-type (Mondrian) quantiles,
-the collapse guard (CALIBER_GUARD=1 restores it), the round-robin of two views.
+"""Unit scorer, design rev. 7 (2026-11-15, notes/2026-11-15_noab_decisions.md).
+rev. 7: novelty is tested over ALL of a unit's events in the plain decoder's representation, so the
+scorer needs only plain(+density) runs. The rev-6 consensus gate (abstaining decoder, run unanimity,
+snapshot voting) matched rev. 7 on the 12 development pairs and failed on held-out datasets (0.87x vs
+0.32x the plain budget); it remains as an ablation (CALIBER_NOV_GATE=abstain CALIBER_NOV_VIEWS=ap).
+The rest of this docstring describes the rev-6 inputs that the ablation still reads.
+
+rev. 6 (2026-11-14, notes/2026-11-14_generality.md). Kept only what the mechanism audit showed to
+help: the plain detector's score, bulk novelty of consensus-abstained events, prevalence, abstention
+members, majority-of-runs consensus, the lagged novelty history.
 
 Inputs: per detector and dataset, two density-enabled training configurations with the same seeds:
   abstaining decoder   --abstain {"o":3} --density   (gambler's-loss abstention + novelty column)
@@ -54,10 +59,12 @@ HOUR = 3600 * 10**9
 
 
 PREV_K = int(os.environ.get("CALIBER_PREV_K", "5"))   # prevalence: rarest distinct actions summed
-# Novelty ablation: NOV_GATE "abstain" (consensus-abstained edges) or "all"; NOV_VIEWS "ap" (max of the
-# abstaining and plain decoders), "a", or "p" (plain only; with NOV_GATE=all no abstaining run is used)
-NOV_GATE = os.environ.get("CALIBER_NOV_GATE", "abstain")
-NOV_VIEWS = os.environ.get("CALIBER_NOV_VIEWS", "ap")
+# Novelty events and views. Default (rev. 7): all events, plain decoder only, so no abstaining run is
+# needed. Ablation of the rev-6 design: NOV_GATE "abstain" (consensus-abstained edges only); NOV_VIEWS
+# "ap" (max of the abstaining and plain decoders) or "a".
+NOV_GATE = os.environ.get("CALIBER_NOV_GATE", "all")
+NOV_VIEWS = os.environ.get("CALIBER_NOV_VIEWS", "p")
+USE_ABSTAIN = NOV_GATE != "all" or "a" in NOV_VIEWS   # rev-6 ablations read the abstaining runs
 
 
 def prevalence(rv, rt, meta, uv_idx, ut_idx, k=None):
@@ -210,7 +217,9 @@ def abstain_snapshots(m):
 
 
 def _variant():
-    """Cache-key suffix for non-default members or abstaining configuration."""
+    """Cache-key suffix. The empty suffix is the rev-6 configuration (consensus-gated, both views):
+    caches written before rev. 7 carry it, so the rev-7 default keeps its hashed suffix and reuses
+    the streams already built for it."""
     guard = os.environ.get("CALIBER_GUARD", "0")
     if (SNAP, LAST, SPEC_ABSTAIN, ABMEM, PREV_K, guard, NOV_GATE, NOV_VIEWS) == \
             (3, 0, '{"o":3}', 0.5, 5, "0", "abstain", "ap"):
@@ -373,8 +382,9 @@ def _score(seeds, A, P, plain_v, plain_t, rv, rt, uv, ut, rar):
         # runs (flat unanimity over all members would shrink the set as runs are added)
         all_ = np.mean([x["all"] for x in ss], 0) >= 0.5
         return all_, sum(x["nov"] for x in ss) / sum(x["n"] for x in ss)
-    gv, nov_v = pool(A["val"])
-    gt, nov_t = pool(A["test"])
+    if USE_ABSTAIN:
+        gv, nov_v = pool(A["val"])
+        gt, nov_t = pool(A["test"])
     nplv = sum(P["val"][s]["nov"] for s in seeds) / sum(P["val"][s]["n"] for s in seeds)
     nplt = sum(P["test"][s]["nov"] for s in seeds) / sum(P["test"][s]["n"] for s in seeds)
     if NOV_GATE == "all":
@@ -414,27 +424,29 @@ def stream(artifact_dir, system, dataset, labels, seeds=(0, 1, 2), base_group=BA
     scorer. S = pooled scorer r, Z = per-seed r_m, U = S + KAPPA * sd(Z)/sqrt(R). Also returns the
     round-robin views (S3, C) and the channels for diagnostics under st['views']."""
     runs = density_runs(artifact_dir, system, dataset)
-    ab, _ = abstain_runs(runs, seeds, spec)
+    ab = abstain_runs(runs, seeds, spec)[0] if USE_ABSTAIN else {}
     pl = {s: m for s, m in runs.get("none", {}).items() if s in seeds}
-    seeds = tuple(s for s in seeds if s in ab and s in pl)
+    seeds = tuple(s for s in seeds if s in pl and (s in ab or not USE_ABSTAIN))
     if not seeds:
-        raise FileNotFoundError(f"{system}/{dataset}: need {spec}+density and plain+density runs "
+        need = f"{spec}+density and plain+density" if USE_ABSTAIN else "plain+density"
+        raise FileNotFoundError(f"{system}/{dataset}: need {need} runs "
                                 f"(have {sorted((k, sorted(v)) for k, v in runs.items())})")
-    ab = {s: ab[s] for s in seeds}
+    ab = {s: ab[s] for s in seeds} if USE_ABSTAIN else {}
     pl = {s: pl[s] for s in seeds}
     base = {m["seed"]: m for m in data.load_manifests(artifact_dir, system, dataset, base_group)
             if m["seed"] in seeds and m.get("test_epochs")}
     plain_src = {s: base.get(s, pl[s]) for s in seeds}
     A, P = {}, {}
     for split in ("val", "test"):
-        r_a, A[split] = _edge_stats(ab, split, True)
         r_p, P[split] = _edge_stats(pl, split, False)
-        assert len(r_a) == len(r_p) and (r_a["time"].values == r_p["time"].values).all()
+        if USE_ABSTAIN:
+            r_a, A[split] = _edge_stats(ab, split, True)
+            assert len(r_a) == len(r_p) and (r_a["time"].values == r_p["time"].values).all()
+            del r_a
         if split == "val":
-            rv = r_a
+            rv = r_p
         else:
-            rt = r_a
-        del r_p
+            rt = r_p
     if verbose:
         print(f"  abstain-score {system}/{dataset}: seeds {seeds}, edges val {len(rv)} test {len(rt)}",
               flush=True)
@@ -444,7 +456,7 @@ def stream(artifact_dir, system, dataset, labels, seeds=(0, 1, 2), base_group=BA
         return sum(stats[s]["q"] for s in seeds) / sum(stats[s]["n"] for s in seeds)
     uv, ut = units(rv, {"q": plain_q(P["val"])}), units(rt, {"q": plain_q(P["test"])})
     plain_v, plain_t = plain_unit_scores(plain_src)
-    _, meta = data.labels_for(ab[seeds[0]], artifact_dir)
+    _, meta = data.labels_for(pl[seeds[0]], artifact_dir)
     rar = prevalence(rv, rt, meta, uv.index, ut.index)
     pooled = _score(seeds, A, P, plain_v, plain_t, rv, rt, uv, ut, rar)
     per = [_score((s,), A, P, plain_v, plain_t, rv, rt, uv, ut, rar) for s in seeds] if len(seeds) > 1 \
@@ -536,9 +548,10 @@ def scored_stream(kind, artifact_dir, system, dataset, labels, seeds=(0, 1, 2)):
     import pickle
     cdir = os.path.join(artifact_dir, "caliber", "cache")
     runs = density_runs(artifact_dir, system, dataset)
-    ab, fell = abstain_runs(runs, seeds)
+    ab, fell = abstain_runs(runs, seeds) if USE_ABSTAIN else ({}, ())
     wtag = f"_w{'-'.join(map(str, fell))}" if fell else ""
-    used = tuple(s for s in seeds if s in ab and s in runs.get("none", {})) or seeds  # key = runs scored
+    used = tuple(s for s in seeds if s in runs.get("none", {}) and (s in ab or not USE_ABSTAIN)) \
+        or seeds                                                  # key = runs scored
     cp = os.path.join(cdir, f"abstain_score_v8_{system}_{dataset}_s{'-'.join(map(str, used))}"
                             f"{_variant()}{wtag}.pkl")
     st = None
