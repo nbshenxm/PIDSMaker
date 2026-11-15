@@ -143,7 +143,7 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
     cases = []                                     # dicts: tier, audited, y, flood
     open_case = {}
     pending = []                                   # (due time, case) awaiting a verdict
-    q_rev, q_act, clock = q0, max(q_act0, q0), None
+    q_rev, q_act, clock = q0, q_act0, None          # q_act: the act controller's own state
     audits = []                                    # recent audited tier-A verdicts
     bounds = np.flatnonzero(np.diff(w[order])) + 1
     for lo, hi in zip(np.r_[0, bounds], np.r_[bounds, len(order)]):
@@ -176,7 +176,7 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
             if c is None and skip_keys is not None and kh in skip_keys:
                 continue                           # case already delivered by another view
             if c is None and use_bucket and REL is None and tokens < 1.0:
-                wants_review = not (S_act[i] >= q_act and (act_key is None or act_key[i] not in seen)
+                wants_review = not (S_act[i] >= max(q_act, q_rev) and (act_key is None or act_key[i] not in seen)
                                     and (act_rate is None or act_tokens >= 1.0))
                 if wants_review:                   # no token: join the pending summary case
                     if pend is None:
@@ -201,7 +201,7 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
             else:
                 novel = True
             if c is None:
-                tier = "A" if (S_act[i] >= q_act and novel
+                tier = "A" if (S_act[i] >= max(q_act, q_rev) and novel
                                and (act_rate is None or act_tokens >= 1.0)) else "B"
                 if tier == "A" and act_rate is not None:
                     act_tokens -= 1.0
@@ -269,7 +269,7 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
                 q_act += eta_act
             elif lb > pi + 0.1:
                 q_act -= 0.25 * eta_act
-        q_act = max(q_act, q_rev)
+        # acting needs both: S_act >= max(q_act, q_rev); the state q_act itself is never clamped
     if REL is not None and use_bucket and hold:    # end of stream: release the last period
         _release(hold, over, cases, tokens, (hold_slot + 1) * REL)
     return case_of, cases
