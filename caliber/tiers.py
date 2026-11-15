@@ -322,7 +322,8 @@ def evaluate(st, case_of, cases, B, tz, attacks=None):
     tierA = np.array([c["tier"] == "A" for c in cases])
     ylab = np.array([c["y"] for c in cases])
     aud = np.array([c["audited"] for c in cases])
-    nA, nB = int(tierA.sum()), int((~tierA).sum())
+    tierC = np.array([c["tier"] == "C" for c in cases], bool)   # dismissed at release (no token)
+    nA, nB = int(tierA.sum()), int((~tierA & ~tierC).sum())
     # attack entities: automated (in a tier-A case) or reviewed (tier-B case within capacity)
     att_units = np.flatnonzero((case_of >= 0) & y)
     auto_ent = {node[i] for i in att_units if tierA[case_of[i]]}
@@ -361,7 +362,7 @@ def evaluate(st, case_of, cases, B, tz, attacks=None):
         "automation_share": nA / max(nA + nB, 1),
         "flood_cases_per_day": sum(bool(c.get("flood")) for c in cases) / nd,
         "precision_A": float(ylab[tierA].mean()) if nA else float("nan"),
-        "precision_B": float(ylab[~tierA].mean()) if nB else float("nan"),
+        "precision_B": float(ylab[~tierA & ~tierC].mean()) if nB else float("nan"),
         "attack_entities_automated": len(auto_ent),
         "attack_entities_reviewed": len(rev_ent - auto_ent),
         "attack_entities_handled": len(auto_ent | rev_ent),
@@ -532,7 +533,11 @@ def main():
                     bucket_h=None if static else BUCKET_H,
                     act_key=exe_key if "_novel" in base else None,
                     act_seen=seen_val if "_novel" in base else None,
-                    act_rate=args.act_rate if args.act_rate > 0 else None, act_depth=args.act_depth)
+                    act_rate=args.act_rate if args.act_rate > 0 else None, act_depth=args.act_depth,
+                    release_h=None if static or not os.environ.get("CALIBER_RELEASE_H")
+                    else float(os.environ["CALIBER_RELEASE_H"]),
+                    summarize=os.environ.get("CALIBER_SUMMARY", "1") == "1",
+                    rev_floor=static or os.environ.get("CALIBER_FLOOR", "1") == "1")
                 r = evaluate(st, case_of, cases, B, tz, labels.get("attacks"))
                 fa = [c for c in cases if c["tier"] == "A" and not c["y"]]
                 nd = max(len(np.unique(day_of(st["t1"], tz))), 1)
