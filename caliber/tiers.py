@@ -248,7 +248,9 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
                 # "seen" = has alerted: scored at the validation alert level q0, as for act_seen.
                 # Without a review threshold every unit passes here, and marking an executable
                 # seen at its first, benign-looking unit would make no attack process ever new.
-                if rev_floor or S[i] >= q0:
+                # (lineage actions: the key is the process tree, "seen" = alerted on the benign days
+                # or already acted on; alerting during the deployment must not block accumulation)
+                if (rev_floor or S[i] >= q0) and not lineage_act:
                     seen.add(act_key[i])
             else:
                 novel = True
@@ -313,6 +315,8 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
                                   "key": L, "t_act": int(t[i]), "action": True})
                     a = len(cases) - 1
                     contained[L] = (a, int(t[i]) + int(act_window_h * HOUR))
+                    if act_key is not None:
+                        seen.add(act_key[i])       # a process tree is acted on at most once
                     if act_rate is not None:
                         act_tokens -= 1.0
                     n_auto += 1
@@ -646,6 +650,9 @@ def main():
         # executables that already alerted on the benign validation day(s) at the start threshold
         U_val = st["S_val"] + args.kappa * sem_val
         seen_val = set(exe_val[np.isfinite(U_val) & (U_val >= q0)].tolist())
+        # lineage actions: process trees that alerted on the benign validation day(s)
+        lin_mode = os.environ.get("CALIBER_ACT_MODE") == "lineage"
+        seen_lin_val = set(np.asarray(lin_val)[np.isfinite(U_val) & (U_val >= q0)].tolist())
         # baseline: all alerts to triage (no automation); then false-automation budgets.
         # Warm start: the validation threshold that would give ~B_auto/day (top-1 when < 1/day).
         # The act tier's budget is ~100x smaller than the review budget, so its controller needs
@@ -669,8 +676,8 @@ def main():
                     q_act0 if b_auto is not None else np.inf, rng,
                     B_auto=b_auto, S_act=S_act, flood_cap=None,
                     bucket_h=None if static else float(os.environ.get("CALIBER_BUCKET_H", BUCKET_H)),
-                    act_key=exe_key if "_novel" in base else None,
-                    act_seen=seen_val if "_novel" in base else None,
+                    act_key=((lin if lin_mode else exe_key) if "_novel" in base else None),
+                    act_seen=((seen_lin_val if lin_mode else seen_val) if "_novel" in base else None),
                     act_rate=args.act_rate if args.act_rate > 0 else None, act_depth=args.act_depth,
                     release_h=None if static or not os.environ.get("CALIBER_RELEASE_H")
                     else float(os.environ["CALIBER_RELEASE_H"]),
