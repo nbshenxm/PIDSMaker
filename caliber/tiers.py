@@ -130,7 +130,8 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
     are admitted in arrival order. The bound is the same; the delay is at most release_h."""
     seen = set(act_seen or ())
     act_tokens = 1.0
-    hold, hold_slot, over = [], None, []           # release_h: held cases; overflow awaiting a token
+    hold, hold_slot = [], None                     # release_h: held cases of the open period
+    summ, merge = None, {}                         # summary case awaiting a token; merged case -> summary
     REL = None if release_h is None else release_h * HOUR
     S_act = S if S_act is None else S_act
     use_bucket = bucket_h is not None
@@ -159,13 +160,12 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
         if REL is not None and use_bucket:
             slot = int(tmax // REL)
             if hold and hold_slot is not None and slot != hold_slot:
-                tokens = _release(hold, over, cases, tokens, (hold_slot + 1) * REL)
+                tokens, summ = _release(hold, cases, tokens, (hold_slot + 1) * REL, summ, merge)
                 hold = []
-            if over and tokens >= 1.0:             # overflow: one summary item with the next token
-                for c in over:
-                    cases[c]["t_deliver"] = tmax
+            if summ is not None and tokens >= 1.0:  # overflow: one summary item with the next token
+                cases[summ]["t_deliver"] = tmax
                 tokens -= 1.0
-                over = []
+                summ = None
             hold_slot = slot
         n_rev, n_auto, opened, bulk, n_bulk = 0, 0, 0, None, 0
         n_over = 0                                 # bucket: review cases that found no token
@@ -271,21 +271,33 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
                 q_act -= 0.25 * eta_act
         # acting needs both: S_act >= max(q_act, q_rev); the state q_act itself is never clamped
     if REL is not None and use_bucket and hold:    # end of stream: release the last period
-        _release(hold, over, cases, tokens, (hold_slot + 1) * REL)
+        _release(hold, cases, tokens, (hold_slot + 1) * REL, summ, merge)
+    if merge:                                      # units of merged cases belong to their summary
+        mp = np.arange(len(cases), dtype=np.int64)
+        for c, s in merge.items():
+            mp[c] = s
+        case_of = np.where(case_of >= 0, mp[np.maximum(case_of, 0)], -1)
     return case_of, cases
 
 
-def _release(hold, over, cases, tokens, t_rel):
+def _release(hold, cases, tokens, t_rel, summ, merge):
     """Admit held review cases at t_rel in descending score order while tokens last; the rest are
-    marked as summary (flood) cases and appended to `over` (delivered as one item later)."""
+    merged into one summary case (created if needed), delivered as a single item with the next
+    token and never automated. Returns (tokens, summary case index or None)."""
     for _, c in sorted(hold, key=lambda x: -x[0]):
         if tokens >= 1.0:
             tokens -= 1.0
             cases[c]["t_deliver"] = t_rel
         else:
-            cases[c]["flood"] = True
-            over.append(c)
-    return tokens
+            if summ is None:
+                cases.append({"tier": "B", "audited": False, "y": False, "flood": True,
+                              "t_deliver": None})
+                summ = len(cases) - 1
+            merge[c] = summ
+            cases[summ]["y"] = cases[summ]["y"] or cases[c]["y"]
+            cases[c]["t_deliver"] = None           # merged: never delivered on its own
+            cases[c]["merged"] = True
+    return tokens, summ
 
 
 def evaluate(st, case_of, cases, B, tz, attacks=None):
