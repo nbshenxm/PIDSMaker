@@ -191,8 +191,11 @@ def one_deployment(S, S_val, st, keys, B, nvd, policy, attacks, tz, cand=None,
         eta = 0.0 if policy == "static" else review_step(cal, B)
         if policy == "caliber":
             kw = {"bucket_h": bucket_h}
-        elif policy == "caliber_hold":              # admit each hour's cases in score order
-            kw = {"bucket_h": bucket_h, "release_h": 1.0}
+        elif policy.startswith("caliber_hold"):     # admit each hour's cases in score order
+            # caliber_hold<k>: the threshold targets k candidate cases per token (default 1), so the
+            # hourly selection, not the threshold, decides which cases reach analysts
+            k = float(policy[len("caliber_hold"):] or 1)
+            kw = {"bucket_h": bucket_h, "release_h": 1.0, "demand": k}
         else:                                       # static: as deployed today, no cap
             kw = {"flood_cap": "auto" if policy == "caliber_cap" else None}
         if views is not None and policy.startswith("caliber"):

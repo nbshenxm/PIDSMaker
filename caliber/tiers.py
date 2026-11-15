@@ -91,7 +91,7 @@ def bucket_depth(B, bucket_h=BUCKET_H):
 def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
                  max_gap_ns=HOUR, window_audits=50, B_auto=None, S_act=None,
                  flood_cap="auto", refund_delay_ns=0, act_key=None, act_seen=None,
-                 bucket_h=None, skip_keys=None, act_rate=None, release_h=None, act_depth=1.0):
+                 bucket_h=None, skip_keys=None, act_rate=None, release_h=None, act_depth=1.0, demand=1.0):
     """B_auto: if set, q_act is driven by a false-automation budget instead of a precision
     target: at most ~B_auto benign cases per day may be acted on automatically. Same
     label-free controller as the review budget (Proposition 1): every new tier-A case counts
@@ -245,7 +245,7 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
         q_prev = q_rev
         if use_bucket:
             # demand (every review case that would have opened) vs budget, clipped to one bucket
-            step = eta * (n_rev + n_over - ref_rev - B * dt)
+            step = eta * (n_rev + n_over - ref_rev - demand * B * dt)   # demand: candidates per token
             q_rev += float(np.clip(step, -eta * D, eta * D))
         else:
             q_rev += eta * (n_rev - ref_rev - B * dt)
