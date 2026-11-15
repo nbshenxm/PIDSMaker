@@ -584,6 +584,8 @@ def main():
         settings = [(None, None)] + [(b, e) for b in [0.25, 1.0] for e in [0.2, 1.0]]
         if args.quick:
             settings = [(None, None), (0.25, 1.0)]
+        if os.environ.get("CALIBER_BAUTO"):        # act-budget sweep, e.g. "0.25,0.5,1,2,4"
+            settings = [(None, None)] + [(float(b), 1.0) for b in os.environ["CALIBER_BAUTO"].split(",")]
         if static:
             settings = [(None, None)]
         for b_auto, eta_a in settings:

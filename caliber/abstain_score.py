@@ -66,7 +66,8 @@ PREV_K = int(os.environ.get("CALIBER_PREV_K", "5"))   # prevalence: rarest disti
 NOV_GATE = os.environ.get("CALIBER_NOV_GATE", "all")
 NOV_VIEWS = os.environ.get("CALIBER_NOV_VIEWS", "p")
 USE_ABSTAIN = NOV_GATE != "all" or "a" in NOV_VIEWS   # rev-6 ablations read the abstaining runs
-# Simple alternatives (reviewer ablations). NOV_STAT: "sign" (multilevel sign test, default), "max"
+# NOV_STAT: "signmax" (default since 2026-11-16: the larger of the calibrated bulk sign test and peak
+# novelty; robust to dilution) or simple alternatives (reviewer ablations): "sign" (bulk test only), "max"
 # (unit max edge novelty), "topk" (mean of the unit's 5 most novel interactions), "frac" (share of its
 # interactions above the validation 0.9 quantile). HIST: "excess" (novelty minus the entity's earlier
 # maximum, default) or "suppress" (no novelty credit once the entity showed validation-top-1% novelty
@@ -74,7 +75,7 @@ USE_ABSTAIN = NOV_GATE != "all" or "a" in NOV_VIEWS   # rev-6 ablations read the
 B_SRC = os.environ.get("CALIBER_B_SRC", "base")
 DILUTE = float(os.environ.get("CALIBER_DILUTE", "0"))   # adaptive dilution of attack units (eval only)
 _ATTACK_MASK = None                                       # set by stream() when DILUTE > 0
-NOV_STAT = os.environ.get("CALIBER_NOV_STAT", "sign")
+NOV_STAT = os.environ.get("CALIBER_NOV_STAT", "signmax")
 HIST = os.environ.get("CALIBER_HIST", "excess")
 
 

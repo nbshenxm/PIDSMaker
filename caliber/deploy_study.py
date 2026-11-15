@@ -301,7 +301,10 @@ def inject_decoys(st, Z, keys, attacks, mode, rate, hours, seed=0):
         z = float(np.nanmax(zmax)) + 0.01
         n = int(round(rate * hours))
         tt = (a["start_ns"] + rng.uniform(0, hours * HOUR, n)).astype(np.int64)
-        pos = np.clip(np.searchsorted(ts, tt, side="right") - 1, 0, len(ts) - 1)
+        # each decoy joins the first window that ends at or after its time and takes that window's
+        # time: a decoy inside a gap in the data must not move the replay clock past the data
+        pos = np.clip(np.searchsorted(ts, tt, side="left"), 0, len(ts) - 1)
+        tt = ts[pos].astype(np.int64)
         add_t.append(tt)
         add_a.append(np.full(n, k, np.int64))
         add_w.append(ws[pos])
