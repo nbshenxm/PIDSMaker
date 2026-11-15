@@ -421,8 +421,8 @@ def main():
     ap.add_argument("--kappa", type=float, default=1.645,
                     help="confidence-interval half-width in ensemble standard errors")
     ap.add_argument("--rules", default="ensemble,ensemble_upper,ensemble_ci,single_run")
-    ap.add_argument("--act_depth", type=float, default=1.0, help="act-tier token bucket depth (actions)")
-    ap.add_argument("--act_rate", type=float, default=1.0,
+    ap.add_argument("--act_depth", type=float, default=4.0, help="act-tier token bucket depth (actions)")
+    ap.add_argument("--act_rate", type=float, default=4.0,
                     help="act-tier token bucket: actions per day, depth one (<= 0: no bucket)")
     ap.add_argument("--no_act_cap", action="store_true",
                     help="do not saturate the act score at the largest benign validation score")
