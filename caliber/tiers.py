@@ -238,6 +238,8 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
                 aud = tier == "A" and rng.random() < audit
                 cases.append({"tier": tier, "audited": aud, "y": False, "flood": False,
                               "key": int(keys[i])})
+                if tier == "A":
+                    cases[-1]["t_act"] = int(t[i])  # time of the automatic action
                 c = len(cases) - 1
                 open_case[kh] = c
                 opened += 1
@@ -257,6 +259,7 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
                 # a held review case is acted on when one of its units qualifies before release
                 # (without a review threshold, a lineage's first, benign-looking unit opens it)
                 cases[c]["tier"] = "A"
+                cases[c]["t_act"] = int(t[i])
                 cases[c].pop("t_deliver", None)
                 del hold[c]
                 if act_rate is not None:
@@ -415,7 +418,11 @@ def evaluate(st, case_of, cases, B, tz, attacks=None):
         "attack_entities": len(set(node[y])),
         **_attack_level(attacks, node, t, np.flatnonzero(y),
                         [i for i in att_units if tierA[case_of[i]] or case_of[i] in reviewed],
-                        [i for i in att_units if tierA[case_of[i]]]),
+                        [i for i in att_units if tierA[case_of[i]]],
+                        {i: max(cases[case_of[i]].get("t_act", t[i]), t[i])
+                         for i in att_units if tierA[case_of[i]]},
+                        {i: max(first_t[case_of[i]], t[i])
+                         for i in att_units if case_of[i] in reviewed}),
     }
 
 
@@ -433,15 +440,28 @@ def unit_attacks(node, t, idx, attacks, slack_ns=HOUR):
     return out
 
 
-def _attack_level(attacks, node, t, mal_units, handled_units, automated_units):
+def _attack_level(attacks, node, t, mal_units, handled_units, automated_units, auto_time=None,
+                  rev_time=None):
+    """auto_time / rev_time: unit -> time it was acted on / delivered to review; gives each
+    attack's hours from its start to the first automatic action and to the first review."""
     if not attacks:
         return {}
     ua = unit_attacks(node, t, mal_units, attacks)
     present = {k for i in mal_units for k in ua[i]}
     handled = {k for i in handled_units for k in ua.get(i, [])}
     automated = {k for i in automated_units for k in ua.get(i, [])}
-    return {"attacks": len(present), "attacks_handled": len(handled & present),
-            "attacks_automated": len(automated & present)}
+    out = {"attacks": len(present), "attacks_handled": len(handled & present),
+           "attacks_automated": len(automated & present)}
+    for name, tm in (("act_delay_h", auto_time), ("review_delay_h", rev_time)):
+        if tm is None:
+            continue
+        first = {}
+        for i, ti in tm.items():
+            for k in ua.get(i, []):
+                first[k] = min(first.get(k, ti), ti)
+        out[name] = {str(k): (v - attacks[k]["start_ns"]) / HOUR for k, v in first.items()
+                     if k in present}
+    return out
 
 
 def _with_borrower(labels, manifest, artifact_dir):

@@ -49,6 +49,12 @@ def cases_of(case_of, cases, S, t, node, y, attacks):
     return open_t, score, case_att
 
 
+def cases_of_st(case_of, cases, S, st, attacks):
+    open_t, score, case_att = cases_of(case_of, cases, S, st["t1"], st["node"], st["y"], attacks)
+    _add_decoys(case_att, case_of, st)
+    return open_t, score, case_att
+
+
 def analyst_queue(open_t, score, B, t_end):
     """Review times (ns, inf if never) under capacity B/day, highest score first."""
     order = np.argsort(open_t)
@@ -90,7 +96,19 @@ def candidate_cases(S, st, keys, attacks, tz):
     case_att = [set() for _ in range(n)]
     for i, ks in unit_attacks(st["node"], st["t1"], np.flatnonzero(st["y"]), attacks).items():
         case_att[inv[i]].update(ks)
+    _add_decoys(case_att, inv, st)
     return score, open_t, case_att, day_of(open_t, tz)
+
+
+def _add_decoys(case_att, case_idx, st):
+    """A case holding a decoy of attack k gets the marker -(k+1): the decoy comes from a foothold
+    the attacker controls, so reviewing it exposes the campaign (not the attack's own activity)."""
+    d = st.get("decoy_of")
+    if d is None:
+        return
+    for i in np.flatnonzero(d >= 0):
+        if case_idx[i] >= 0:
+            case_att[case_idx[i]].add(-int(d[i]) - 1)
 
 
 def fixed_threshold_cases(cand, policy, q0, B):
@@ -221,7 +239,7 @@ def one_deployment(S, S_val, st, keys, B, nvd, policy, attacks, tz, cand=None,
                                           refund_delay_ns=verdict_delay_ns, max_gap_ns=max_gap_ns,
                                           **kw)
         n_flood = sum(bool(c.get("flood")) for c in cases)
-        open_t, score, case_att = cases_of(case_of, cases, S, st["t1"], st["node"], st["y"], attacks)
+        open_t, score, case_att = cases_of_st(case_of, cases, S, st, attacks)
         summary = np.array([bool(c.get("flood")) for c in cases], bool)
         for c, cs in enumerate(cases):              # token bucket: summary delivered later/never
             if "t_deliver" in cs:
@@ -233,23 +251,32 @@ def one_deployment(S, S_val, st, keys, B, nvd, policy, attacks, tz, cand=None,
     per_day = np.array([np.sum(days == d) for d in test_days], float)
     reviewed = analyst_queue(open_t, score, B, float(st["t1"].max()))
     present = [k_ for k_, a in enumerate(attacks) if set(a["nids"]) & set(st["node"][st["y"]])]
-    ttr, ttr_ind = {}, {}
+    ttr, ttr_ind, tte = {}, {}, {}
     for c in np.flatnonzero(np.isfinite(reviewed)):
         for a in case_att[c]:
-            h = (reviewed[c] - attacks[a]["start_ns"]) / HOUR
+            k = a if a >= 0 else -a - 1            # decoy marker -(k+1): exposes campaign k
+            h = (reviewed[c] - attacks[k]["start_ns"]) / HOUR
+            if summary is None or not summary[c]:
+                tte[k] = min(tte.get(k, np.inf), h)
+            if a < 0:
+                continue
             ttr[a] = min(ttr.get(a, np.inf), h)
             if summary is None or not summary[c]:   # seen in an individual case, not a summary
                 ttr_ind[a] = min(ttr_ind.get(a, np.inf), h)
     # attack cases never reviewed (expired in the queue): the replay refunded them at the verdict
     # delay, which overstates the refunds an analyst could have given; should stay ~0
-    unrev = sum(1 for c in range(len(case_att)) if case_att[c] and not np.isfinite(reviewed[c]))
+    unrev = sum(1 for c in range(len(case_att))
+                if any(a >= 0 for a in case_att[c]) and not np.isfinite(reviewed[c]))
     return {"load_ratio": float(per_day.mean() / B), "worst_day_ratio": float(per_day.max() / B),
             "flood_cases": int(n_flood), "unreviewed_attack_cases": int(unrev),
             "attacks": len(present), "attacks_seen": sum(a in ttr for a in present),
             "attacks_seen_individual": sum(a in ttr_ind for a in present),
             "time_to_review_h": {str(a): float(ttr[a]) for a in present if a in ttr},
             "time_to_review_individual_h": {str(a): float(ttr_ind[a]) for a in present
-                                            if a in ttr_ind}}
+                                            if a in ttr_ind},
+            # campaign exposed: an individually reviewed case holds the attack or one of its decoys
+            "attacks_exposed": sum(a in tte for a in present),
+            "time_to_expose_h": {str(a): float(tte[a]) for a in present if a in tte}}
 
 
 def inject_decoys(st, Z, keys, attacks, mode, rate, hours, seed=0):
@@ -264,7 +291,7 @@ def inject_decoys(st, Z, keys, attacks, mode, rate, hours, seed=0):
     ua = unit_attacks(st["node"], st["t1"], yi, attacks)
     order = np.argsort(st["t1"], kind="stable")
     ts, ws = st["t1"][order], st["w"][order]
-    add_t, add_w, add_k, add_z, add_s = [], [], [], [], []
+    add_t, add_w, add_k, add_z, add_s, add_a = [], [], [], [], [], []
     pooled = [k for k in ("S", "U") if k in st and len(st[k]) == len(st["t1"])]
     for k, a in enumerate(attacks):
         units = np.array([i for i, ks in ua.items() if k in ks], np.int64)
@@ -276,6 +303,7 @@ def inject_decoys(st, Z, keys, attacks, mode, rate, hours, seed=0):
         tt = (a["start_ns"] + rng.uniform(0, hours * HOUR, n)).astype(np.int64)
         pos = np.clip(np.searchsorted(ts, tt, side="right") - 1, 0, len(ts) - 1)
         add_t.append(tt)
+        add_a.append(np.full(n, k, np.int64))
         add_w.append(ws[pos])
         if mode == "one":
             add_k.append(np.full(n, keys[units[np.argmax(zmax)]], np.int64))
@@ -294,6 +322,7 @@ def inject_decoys(st, Z, keys, attacks, mode, rate, hours, seed=0):
     st2["t1"] = np.concatenate([st["t1"], t_new])
     st2["w"] = np.concatenate([st["w"], w_new])
     st2["y"] = np.concatenate([st["y"], np.zeros(n_new, bool)])
+    st2["decoy_of"] = np.concatenate([np.full(len(st["t1"]), -1, np.int64), np.concatenate(add_a)])
     st2["node"] = np.concatenate([st["node"], -(np.arange(n_new, dtype=np.int64) + 1 + 2 * 10**12)])
     for p in pooled:
         st2[p] = np.concatenate([st[p]] + [d[p] for d in add_s])
