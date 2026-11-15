@@ -163,17 +163,26 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
         tmax = t[ix].max()
         elapsed = 0.0 if clock is None else max(tmax - clock, 0) / DAY
         dt = elapsed if use_bucket else min(elapsed * DAY, max_gap_ns) / DAY
+        t_prev = clock
         clock = tmax if clock is None else max(clock, tmax)
-        if use_bucket:
-            tokens = min(D, tokens + B * elapsed)
         if act_rate is not None:
             act_tokens = min(float(act_depth), act_tokens + act_rate * elapsed)
+        rest = elapsed                             # refill not yet credited
         if REL is not None and use_bucket:
             slot = int(clock // REL)               # replay clock: never moves backwards
             if hold and hold_slot is not None and slot != hold_slot:
-                tokens, summ = _release(hold, cases, tokens, (hold_slot + 1) * REL, summ, merge,
+                t_rel = (hold_slot + 1) * REL
+                # the release spends only tokens accrued by its own time: a release that runs
+                # late (after a gap in the data) must not borrow the gap's refill
+                pre = min(max(t_rel - t_prev, 0) / DAY, elapsed) if t_prev is not None else 0.0
+                tokens = min(D, tokens + B * pre)
+                rest = elapsed - pre
+                tokens, summ = _release(hold, cases, tokens, t_rel, summ, merge,
                                         summarize, last_rev, fresh_ns)
                 hold = {}
+        if use_bucket:
+            tokens = min(D, tokens + B * rest)
+        if REL is not None and use_bucket:
             if summ is not None and tokens >= 1.0:  # overflow: one summary item with the next token
                 cases[summ]["t_deliver"] = tmax
                 tokens -= 1.0
@@ -238,6 +247,16 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
                 if aud:
                     audits.append(bool(y[i]))
                     audits[:] = audits[-window_audits:]
+            elif (c in hold and S_act[i] >= max(q_act, q_rev) and novel
+                  and (act_rate is None or act_tokens >= 1.0)):
+                # a held review case is acted on when one of its units qualifies before release
+                # (without a review threshold, a lineage's first, benign-looking unit opens it)
+                cases[c]["tier"] = "A"
+                cases[c].pop("t_deliver", None)
+                del hold[c]
+                if act_rate is not None:
+                    act_tokens -= 1.0
+                n_auto += 1
             cases[c]["y"] = cases[c]["y"] or bool(y[i])
             case_of[i] = c
             if c in hold and S[i] > hold[c]:       # a held case ranks by its highest unit so far
