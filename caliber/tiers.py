@@ -169,7 +169,7 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
         if act_rate is not None:
             act_tokens = min(float(act_depth), act_tokens + act_rate * elapsed)
         if REL is not None and use_bucket:
-            slot = int(tmax // REL)
+            slot = int(clock // REL)               # replay clock: never moves backwards
             if hold and hold_slot is not None and slot != hold_slot:
                 tokens, summ = _release(hold, cases, tokens, (hold_slot + 1) * REL, summ, merge,
                                         summarize, last_rev, fresh_ns)
@@ -209,7 +209,11 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
                 c = open_case[kh] = bulk
             if act_key is not None:
                 novel = act_key[i] not in seen
-                seen.add(act_key[i])
+                # "seen" = has alerted: scored at the validation alert level q0, as for act_seen.
+                # Without a review threshold every unit passes here, and marking an executable
+                # seen at its first, benign-looking unit would make no attack process ever new.
+                if rev_floor or S[i] >= q0:
+                    seen.add(act_key[i])
             else:
                 novel = True
             if c is None:
