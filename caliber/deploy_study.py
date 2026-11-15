@@ -108,18 +108,21 @@ def fixed_threshold_cases(cand, policy, q0, B):
             q_of_day[d] = prev
             s = np.sort(score[days == d])
             prev = float(s[-min(int(B), len(s))]) if len(s) else prev
-    elif policy == "hourtopB":                      # online top-k: each hour's best B/24 cases,
-        hours = (open_t // HOUR).astype(np.int64)   # released at the end of that hour
+    elif policy == "hourtopB" or policy.startswith("ptopB"):
+        # online top-k: each period's best B*R/24 cases, released at the end of that period
+        # (hourtopB: R = 1 h; ptopB<R>: R hours)
+        R = 1.0 if policy == "hourtopB" else float(policy[len("ptopB"):])
+        hours = (open_t // (R * HOUR)).astype(np.int64)
         keep = np.zeros(len(score), bool)
         release = open_t.copy()
         credit = 0.0
         for h in np.unique(hours):
             ix = np.flatnonzero(hours == h)
-            credit += B / 24.0                       # fractional quota carries over; idle
+            credit += B * R / 24.0                   # fractional quota carries over; idle
             k = int(credit)                          # capacity does not accumulate
             credit -= k
             keep[ix[np.argsort(-score[ix])[:k]]] = True
-            release[ix] = (h + 1) * HOUR
+            release[ix] = (h + 1) * R * HOUR
         return release[keep], score[keep], [case_att[i] for i in np.flatnonzero(keep)]
     elif policy == "daytopB":                       # Ho et al. '17: the day's top B, at day end
         keep = np.zeros(len(score), bool)
@@ -185,7 +188,7 @@ def one_deployment(S, S_val, st, keys, B, nvd, policy, attacks, tz, cand=None,
     q0 = case_threshold(S_val, st["t_val"], st["node_val"] if keys_val is None else keys_val, B, nvd)
     n_flood = 0
     summary = None                                  # per case: is it a summary (bulk) item
-    if policy in ("hindsight", "prevday", "daytopB", "hourtopB"):
+    if policy in ("hindsight", "prevday", "daytopB", "hourtopB") or policy.startswith("ptopB"):
         open_t, score, case_att = fixed_threshold_cases(cand, policy, q0, B)
     else:
         eta = 0.0 if policy == "static" else review_step(cal, B)
