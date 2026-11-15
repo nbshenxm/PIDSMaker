@@ -134,7 +134,7 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
     score-ordered release (top-k per period with carry-over up to D); q_rev is not used."""
     seen = set(act_seen or ())
     act_tokens = float(act_depth)
-    hold, hold_slot = [], None                     # release_h: held cases of the open period
+    hold, hold_slot = {}, None                     # release_h: held case -> its highest score so far
     summ, merge = None, {}                         # summary case awaiting a token; merged case -> summary
     REL = None if release_h is None else release_h * HOUR
     S_act = S if S_act is None else S_act
@@ -168,7 +168,7 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
             if hold and hold_slot is not None and slot != hold_slot:
                 tokens, summ = _release(hold, cases, tokens, (hold_slot + 1) * REL, summ, merge,
                                         summarize)
-                hold = []
+                hold = {}
             if summ is not None and tokens >= 1.0:  # overflow: one summary item with the next token
                 cases[summ]["t_deliver"] = tmax
                 tokens -= 1.0
@@ -221,7 +221,7 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
                 n_auto += int(tier == "A")
                 if use_bucket and REL is not None and tier == "B":
                     cases[c]["t_deliver"] = None   # held until its release period closes
-                    hold.append((float(S[i]), c))
+                    hold[c] = float(S[i])
                 elif use_bucket and (tier == "B" or aud):
                     tokens -= 1.0
                 pending.append((t[i] + refund_delay_ns, c))
@@ -230,6 +230,8 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
                     audits[:] = audits[-window_audits:]
             cases[c]["y"] = cases[c]["y"] or bool(y[i])
             case_of[i] = c
+            if c in hold and S[i] > hold[c]:       # a held case ranks by its highest unit so far
+                hold[c] = float(S[i])
         if use_bucket and pend is not None and tokens >= 1.0:
             # deliver the summary of the overflow as one item with the next token
             cases[pend]["t_deliver"] = tmax
@@ -293,7 +295,7 @@ def _release(hold, cases, tokens, t_rel, summ, merge, summarize=True):
     """Admit held review cases at t_rel in descending score order while tokens last; the rest are
     merged into one summary case (created if needed), delivered as a single item with the next
     token and never automated. Returns (tokens, summary case index or None)."""
-    for _, c in sorted(hold, key=lambda x: -x[0]):
+    for c, _ in sorted(hold.items(), key=lambda x: -x[1]):
         if tokens >= 1.0:
             tokens -= 1.0
             cases[c]["t_deliver"] = t_rel
