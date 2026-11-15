@@ -111,7 +111,7 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
                  max_gap_ns=HOUR, window_audits=50, B_auto=None, S_act=None,
                  flood_cap="auto", refund_delay_ns=0, act_key=None, act_seen=None,
                  bucket_h=None, skip_keys=None, act_rate=None, release_h=None, act_depth=1.0, demand=1.0,
-                 summarize=True, rev_floor=True, fresh_h=None):
+                 summarize=True, rev_floor=True, fresh_h=None, lineage_act=False, act_window_h=24.0):
     """B_auto: if set, q_act is driven by a false-automation budget instead of a precision
     target: at most ~B_auto benign cases per day may be acted on automatically. Same
     label-free controller as the review budget (Proposition 1): every new tier-A case counts
@@ -155,6 +155,9 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
     behind lineages that had not, so one foothold takes at most one slot per release while others
     wait (decoy floods from few footholds; benign lineages that alert every hour)."""
     seen = set(act_seen or ())
+    from collections import defaultdict
+    contained = {}                                 # lineage_act: process tree -> (action case, until)
+    lin_cases = defaultdict(list)                  # lineage_act: process tree -> [(open time, case)]
     last_rev = {} if fresh_h else None             # lineage key -> time of its last admitted case
     fresh_ns = fresh_h * HOUR if fresh_h else None
     act_tokens = float(act_depth)
@@ -250,7 +253,7 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
             else:
                 novel = True
             if c is None:
-                tier = "A" if (S_act[i] >= max(q_act, q_rev) and novel
+                tier = "A" if (not lineage_act and S_act[i] >= max(q_act, q_rev) and novel
                                and (act_rate is None or act_tokens >= 1.0)) else "B"
                 if tier == "A" and act_rate is not None:
                     act_tokens -= 1.0
@@ -273,7 +276,7 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
                 if aud:
                     audits.append(bool(y[i]))
                     audits[:] = audits[-window_audits:]
-            elif (c in hold and S_act[i] >= max(q_act, q_rev) and novel
+            elif (not lineage_act and c in hold and S_act[i] >= max(q_act, q_rev) and novel
                   and (act_rate is None or act_tokens >= 1.0)):
                 # a held review case is acted on when one of its units qualifies before release
                 # (without a review threshold, a lineage's first, benign-looking unit opens it)
@@ -288,6 +291,43 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
             case_of[i] = c
             if c in hold and S[i] > hold[c]:       # a held case ranks by its highest unit so far
                 hold[c] = float(S[i])
+            if lineage_act:
+                L = int(keys[i])
+                if not lin_cases[L] or lin_cases[L][-1][1] != c:
+                    lin_cases[L].append((int(t[i]), c))
+                ct = contained.get(L)
+                if ct is not None and t[i] <= ct[1]:
+                    # the process tree is contained: its new activity is handled automatically
+                    a = ct[0]
+                    if c in hold:
+                        del hold[c]
+                        cases[c].pop("t_deliver", None)
+                        cases[c]["tier"] = "A"
+                    cases[c]["acted"] = True
+                    cases[c].setdefault("t_act", int(t[i]))
+                    cases[a]["y"] = cases[a]["y"] or bool(y[i])
+                elif (S_act[i] >= q_act and novel and (act_rate is None or act_tokens >= 1.0)):
+                    # one action on the whole process tree: its cases of the past window and its
+                    # activity for the next window; counted once, refunded if any of it is malicious
+                    cases.append({"tier": "A", "audited": False, "y": False, "flood": False,
+                                  "key": L, "t_act": int(t[i]), "action": True})
+                    a = len(cases) - 1
+                    contained[L] = (a, int(t[i]) + int(act_window_h * HOUR))
+                    if act_rate is not None:
+                        act_tokens -= 1.0
+                    n_auto += 1
+                    pending.append((t[i] + refund_delay_ns, a))
+                    lo = t[i] - act_window_h * HOUR
+                    for t0, cc in lin_cases[L]:
+                        if t0 < lo:
+                            continue
+                        if cc in hold:
+                            del hold[cc]
+                            cases[cc].pop("t_deliver", None)
+                            cases[cc]["tier"] = "A"
+                        cases[cc]["acted"] = True
+                        cases[cc].setdefault("t_act", int(t[i]))
+                        cases[a]["y"] = cases[a]["y"] or cases[cc]["y"]
         if use_bucket and pend is not None and tokens >= 1.0:
             # deliver the summary of the overflow as one item with the next token
             cases[pend]["t_deliver"] = tmax
@@ -394,7 +434,9 @@ def evaluate(st, case_of, cases, B, tz, attacks=None):
     nA, nB = int(tierA.sum()), int((~tierA & ~tierC).sum())
     # attack entities: automated (in a tier-A case) or reviewed (tier-B case within capacity)
     att_units = np.flatnonzero((case_of >= 0) & y)
-    auto_ent = {node[i] for i in att_units if tierA[case_of[i]]}
+    # automated: in a tier-A case, or in a case covered by an action on its process tree
+    autoA = tierA | np.array([bool(c.get("acted")) for c in cases], bool)
+    auto_ent = {node[i] for i in att_units if autoA[case_of[i]]}
     # analyst capacity: first B tier-B/audit cases per day (FIFO by opening time)
     first_t = {}
     for i in np.flatnonzero(case_of >= 0):
@@ -436,10 +478,10 @@ def evaluate(st, case_of, cases, B, tz, attacks=None):
         "attack_entities_handled": len(auto_ent | rev_ent),
         "attack_entities": len(set(node[y])),
         **_attack_level(attacks, node, t, np.flatnonzero(y),
-                        [i for i in att_units if tierA[case_of[i]] or case_of[i] in reviewed],
-                        [i for i in att_units if tierA[case_of[i]]],
+                        [i for i in att_units if autoA[case_of[i]] or case_of[i] in reviewed],
+                        [i for i in att_units if autoA[case_of[i]]],
                         {i: max(cases[case_of[i]].get("t_act", t[i]), t[i])
-                         for i in att_units if tierA[case_of[i]]},
+                         for i in att_units if autoA[case_of[i]]},
                         {i: max(first_t[case_of[i]], t[i])
                          for i in att_units if case_of[i] in reviewed}),
     }
@@ -633,9 +675,15 @@ def main():
                     release_h=None if static or not os.environ.get("CALIBER_RELEASE_H")
                     else float(os.environ["CALIBER_RELEASE_H"]),
                     summarize=os.environ.get("CALIBER_SUMMARY", "1") == "1",
-                    rev_floor=static or os.environ.get("CALIBER_FLOOR", "1") == "1")
+                    rev_floor=static or os.environ.get("CALIBER_FLOOR", "1") == "1",
+                    lineage_act=os.environ.get("CALIBER_ACT_MODE") == "lineage",
+                    act_window_h=float(os.environ.get("CALIBER_ACT_WINDOW_H", "24")))
                 r = evaluate(st, case_of, cases, B, tz, labels.get("attacks"))
-                fa = [c for c in cases if c["tier"] == "A" and not c["y"]]
+                if any(c.get("action") for c in cases):   # lineage actions: one per process tree
+                    fa = [c for c in cases if c.get("action") and not c["y"]]
+                    r["actions"] = sum(bool(c.get("action")) for c in cases)
+                else:
+                    fa = [c for c in cases if c["tier"] == "A" and not c["y"]]
                 nd = max(len(np.unique(day_of(st["t1"], tz))), 1)
                 r["false_automations_per_day"] = len(fa) / nd
                 tag = f"{score_name} " + ("all-to-triage" if b_auto is None
