@@ -363,6 +363,8 @@ def main():
     ap.add_argument("--kappa", type=float, default=1.645,
                     help="confidence-interval half-width in ensemble standard errors")
     ap.add_argument("--rules", default="ensemble,ensemble_upper,ensemble_ci,single_run")
+    ap.add_argument("--no_act_cap", action="store_true",
+                    help="do not saturate the act score at the largest benign validation score")
     ap.add_argument("--quick", action="store_true",
                     help="only all-to-triage and B_auto=0.25 (eta_act=1.0)")
     ap.add_argument("--single_all", action="store_true",
@@ -426,6 +428,11 @@ def main():
         q0 = case_threshold(cal, st["t_val"], lin_val, B, nvd)   # B cases/day on validation
         cal = cal[np.isfinite(cal)]
         cal_act = cal if cal_act is None else cal_act[np.isfinite(cal_act)]
+        # The act score saturates at the largest benign validation score: a unit more extreme than
+        # every benign validation unit is equally certain. This fixes s_max in Prop. 1, and the warm
+        # start below sits at or just under it, so the additive constant stays below one case.
+        if not args.no_act_cap:
+            S_act = np.minimum(S if S_act is None else S_act, float(np.max(cal_act)))
         sd = float(np.std(cal)) or 1.0
         # executables that already alerted on the benign validation day(s) at the start threshold
         U_val = st["S_val"] + args.kappa * sem_val
