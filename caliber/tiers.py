@@ -91,7 +91,8 @@ def bucket_depth(B, bucket_h=BUCKET_H):
 def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
                  max_gap_ns=HOUR, window_audits=50, B_auto=None, S_act=None,
                  flood_cap="auto", refund_delay_ns=0, act_key=None, act_seen=None,
-                 bucket_h=None, skip_keys=None, act_rate=None, release_h=None, act_depth=1.0, demand=1.0):
+                 bucket_h=None, skip_keys=None, act_rate=None, release_h=None, act_depth=1.0, demand=1.0,
+                 summarize=True, rev_floor=True):
     """B_auto: if set, q_act is driven by a false-automation budget instead of a precision
     target: at most ~B_auto benign cases per day may be acted on automatically. Same
     label-free controller as the review budget (Proposition 1): every new tier-A case counts
@@ -127,7 +128,10 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
     release_h (with bucket_h): new review cases are held until their release period of release_h
     hours closes (the case aggregation period), then admitted in descending score order while
     tokens last; the rest join one summary item delivered with the next token. Without it, cases
-    are admitted in arrival order. The bound is the same; the delay is at most release_h."""
+    are admitted in arrival order. The bound is the same; the delay is at most release_h.
+    summarize=False (with release_h): overflow is dismissed instead of summarized (no token).
+    rev_floor=False (with release_h): no review threshold; every unit competes in its period's
+    score-ordered release (top-k per period with carry-over up to D); q_rev is not used."""
     seen = set(act_seen or ())
     act_tokens = float(act_depth)
     hold, hold_slot = [], None                     # release_h: held cases of the open period
@@ -145,6 +149,8 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
     open_case = {}
     pending = []                                   # (due time, case) awaiting a verdict
     q_rev, q_act, clock = q0, q_act0, None          # q_act: the act controller's own state
+    if not rev_floor:
+        q_rev = -np.inf
     audits = []                                    # recent audited tier-A verdicts
     bounds = np.flatnonzero(np.diff(w[order])) + 1
     for lo, hi in zip(np.r_[0, bounds], np.r_[bounds, len(order)]):
@@ -160,7 +166,8 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
         if REL is not None and use_bucket:
             slot = int(tmax // REL)
             if hold and hold_slot is not None and slot != hold_slot:
-                tokens, summ = _release(hold, cases, tokens, (hold_slot + 1) * REL, summ, merge)
+                tokens, summ = _release(hold, cases, tokens, (hold_slot + 1) * REL, summ, merge,
+                                        summarize)
                 hold = []
             if summ is not None and tokens >= 1.0:  # overflow: one summary item with the next token
                 cases[summ]["t_deliver"] = tmax
@@ -169,7 +176,7 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
             hold_slot = slot
         n_rev, n_auto, opened, bulk, n_bulk = 0, 0, 0, None, 0
         n_over = 0                                 # bucket: review cases that found no token
-        al = ix[S[ix] >= q_rev]
+        al = ix[S[ix] >= q_rev] if rev_floor else ix[np.isfinite(S[ix])]
         for i in al[np.argsort(-S[al], kind="stable")]:
             kh = (keys[i], int(t[i] // HOUR))
             c = open_case.get(kh)
@@ -243,7 +250,9 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
                         ref_rev += 1
         # review budget (tier B + audits), counting the cases actually delivered
         q_prev = q_rev
-        if use_bucket:
+        if not rev_floor:
+            pass                                   # no review threshold: the release ranks
+        elif use_bucket:
             # demand (every review case that would have opened) vs budget, clipped to one bucket
             step = eta * (n_rev + n_over - ref_rev - demand * B * dt)   # demand: candidates per token
             q_rev += float(np.clip(step, -eta * D, eta * D))
@@ -271,7 +280,7 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
                 q_act -= 0.25 * eta_act
         # acting needs both: S_act >= max(q_act, q_rev); the state q_act itself is never clamped
     if REL is not None and use_bucket and hold:    # end of stream: release the last period
-        _release(hold, cases, tokens, (hold_slot + 1) * REL, summ, merge)
+        _release(hold, cases, tokens, (hold_slot + 1) * REL, summ, merge, summarize)
     if merge:                                      # units of merged cases belong to their summary
         mp = np.arange(len(cases), dtype=np.int64)
         for c, s in merge.items():
@@ -280,7 +289,7 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
     return case_of, cases
 
 
-def _release(hold, cases, tokens, t_rel, summ, merge):
+def _release(hold, cases, tokens, t_rel, summ, merge, summarize=True):
     """Admit held review cases at t_rel in descending score order while tokens last; the rest are
     merged into one summary case (created if needed), delivered as a single item with the next
     token and never automated. Returns (tokens, summary case index or None)."""
@@ -288,6 +297,9 @@ def _release(hold, cases, tokens, t_rel, summ, merge):
         if tokens >= 1.0:
             tokens -= 1.0
             cases[c]["t_deliver"] = t_rel
+        elif not summarize:                        # overflow is dismissed (logged, no token)
+            cases[c]["t_deliver"] = None
+            cases[c]["tier"] = "C"
         else:
             if summ is None:
                 cases.append({"tier": "B", "audited": False, "y": False, "flood": True,

@@ -196,7 +196,8 @@ def one_deployment(S, S_val, st, keys, B, nvd, policy, attacks, tz, cand=None,
             # hourly selection, not the threshold, decides which cases reach analysts
             k = float(policy[len("caliber_hold"):] or 1)
             kw = {"bucket_h": bucket_h, "release_h": float(os.environ.get("CALIBER_RELEASE_H", "1")),
-                  "demand": k}
+                  "demand": k, "summarize": os.environ.get("CALIBER_SUMMARY", "1") == "1",
+                  "rev_floor": os.environ.get("CALIBER_FLOOR", "1") == "1"}
         else:                                       # static: as deployed today, no cap
             kw = {"flood_cap": "auto" if policy == "caliber_cap" else None}
         if views is not None and policy.startswith("caliber"):
