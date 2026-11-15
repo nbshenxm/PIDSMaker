@@ -145,6 +145,11 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
     S_act = S if S_act is None else S_act
     use_bucket = bucket_h is not None
     D = bucket_depth(B, bucket_h) if use_bucket else None
+    if use_bucket and REL is not None and not rev_floor:
+        # ranked release (quota per period with bucket_h = release_h): one extra case of depth holds
+        # the fractional share that carries over; otherwise the cap would discard it every period
+        # (B=20, R=2 h: 1 case per period instead of 1.67). Bound: B (t + bucket_h/24) + 1.
+        D = B * bucket_h / 24.0 + 1.0
     tokens = D
     pend = None                                    # pending summary case awaiting a token
     cap = None if use_bucket else (flood_cap_for(B) if flood_cap == "auto" else flood_cap)
