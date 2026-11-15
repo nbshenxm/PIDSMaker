@@ -54,6 +54,10 @@ HOUR = 3600 * 10**9
 
 
 PREV_K = int(os.environ.get("CALIBER_PREV_K", "5"))   # prevalence: rarest distinct actions summed
+# Novelty ablation: NOV_GATE "abstain" (consensus-abstained edges) or "all"; NOV_VIEWS "ap" (max of the
+# abstaining and plain decoders), "a", or "p" (plain only; with NOV_GATE=all no abstaining run is used)
+NOV_GATE = os.environ.get("CALIBER_NOV_GATE", "abstain")
+NOV_VIEWS = os.environ.get("CALIBER_NOV_VIEWS", "ap")
 
 
 def prevalence(rv, rt, meta, uv_idx, ut_idx, k=None):
@@ -208,10 +212,13 @@ def abstain_snapshots(m):
 def _variant():
     """Cache-key suffix for non-default members or abstaining configuration."""
     guard = os.environ.get("CALIBER_GUARD", "0")
-    if (SNAP, LAST, SPEC_ABSTAIN, ABMEM, PREV_K, guard) == (3, 0, '{"o":3}', 0.5, 5, "0"):
+    if (SNAP, LAST, SPEC_ABSTAIN, ABMEM, PREV_K, guard, NOV_GATE, NOV_VIEWS) == \
+            (3, 0, '{"o":3}', 0.5, 5, "0", "abstain", "ap"):
         return ""
     import hashlib
     key = f"{SNAP}|{LAST}|{SPEC_ABSTAIN}|{ABMEM}|k{PREV_K}|g{guard}"
+    if (NOV_GATE, NOV_VIEWS) != ("abstain", "ap"):
+        key += f"|{NOV_GATE}|{NOV_VIEWS}"
     return "_" + hashlib.md5(key.encode()).hexdigest()[:8]
 
 
@@ -370,11 +377,20 @@ def _score(seeds, A, P, plain_v, plain_t, rv, rt, uv, ut, rar):
     gt, nov_t = pool(A["test"])
     nplv = sum(P["val"][s]["nov"] for s in seeds) / sum(P["val"][s]["n"] for s in seeds)
     nplt = sum(P["test"][s]["nov"] for s in seeds) / sum(P["test"][s]["n"] for s in seeds)
+    if NOV_GATE == "all":
+        gv, gt = np.ones(len(rv), bool), np.ones(len(rt), bool)
     # bulk novelty of the consensus-abstained events, in both decoders' representations (max)
-    vo, to = bulk_novelty(rv, gv, nov_v, rt, gt, nov_t, uv.index, ut.index)
-    vp, tp = bulk_novelty(rv, gv, nplv, rt, gt, nplt, uv.index, ut.index)
-    fm = tail_fn(np.maximum(vo, vp))
-    n_v, n_t = fm(np.maximum(vo, vp)), fm(np.maximum(to, tp))
+    outs = []
+    if "a" in NOV_VIEWS:
+        outs.append(bulk_novelty(rv, gv, nov_v, rt, gt, nov_t, uv.index, ut.index))
+    if "p" in NOV_VIEWS:
+        outs.append(bulk_novelty(rv, gv, nplv, rt, gt, nplt, uv.index, ut.index))
+    if len(outs) == 1:
+        n_v, n_t = outs[0]
+    else:
+        (vo, to), (vp, tp) = outs
+        fm = tail_fn(np.maximum(vo, vp))
+        n_v, n_t = fm(np.maximum(vo, vp)), fm(np.maximum(to, tp))
     # novelty an entity already showed a review day earlier (>= LAG_H) was surfaced then: routine now
     n_v, n_t = lag_excess(uv.index.get_level_values("node").values, uv["t1"].values, n_v,
                           ut.index.get_level_values("node").values, ut["t1"].values, n_t)
