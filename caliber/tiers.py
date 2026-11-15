@@ -571,7 +571,7 @@ def main():
                     2.0, audit if b_auto is not None else 0.0,
                     (eta_a or 0.02) * sd, q_act0 if b_auto is not None else np.inf, rng,
                     B_auto=b_auto, S_act=S_act, flood_cap=None,
-                    bucket_h=None if static else BUCKET_H,
+                    bucket_h=None if static else float(os.environ.get("CALIBER_BUCKET_H", BUCKET_H)),
                     act_key=exe_key if "_novel" in base else None,
                     act_seen=seen_val if "_novel" in base else None,
                     act_rate=args.act_rate if args.act_rate > 0 else None, act_depth=args.act_depth,
