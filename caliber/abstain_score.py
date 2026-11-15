@@ -50,11 +50,12 @@ from caliber.pilot import normaliser, unit_labels, unit_table
 SNAP = int(os.environ.get("CALIBER_SNAP", "3"))
 LAST = int(os.environ.get("CALIBER_LAST", "0"))   # > 0: only the last LAST saved snapshots of a run
 THR = 0.5
-LEVELS = (0.5, 0.75, 0.9, 0.95, 0.99)
+LEVELS = tuple(float(x) for x in os.environ.get("CALIBER_LEVELS", "0.5,0.75,0.9,0.95,0.99").split(","))
 SPEC_ABSTAIN = os.environ.get("CALIBER_ABSTAIN_SPEC", '{"o":3}')
 BASE_GROUP = "da39a3ee5e"
 KAPPA = 1.645
-LAG_H = 24.0          # novelty history lag: one review day
+LAG_H = float(os.environ.get("CALIBER_LAG_H", "24"))   # novelty history lag: one review day
+#                                                         (a value beyond the test span: no history)
 HOUR = 3600 * 10**9
 
 
@@ -228,6 +229,8 @@ def _variant():
     key = f"{SNAP}|{LAST}|{SPEC_ABSTAIN}|{ABMEM}|k{PREV_K}|g{guard}"
     if (NOV_GATE, NOV_VIEWS) != ("abstain", "ap"):
         key += f"|{NOV_GATE}|{NOV_VIEWS}"
+    if LAG_H != 24.0 or LEVELS != (0.5, 0.75, 0.9, 0.95, 0.99):     # sensitivity sweeps
+        key += f"|lag{LAG_H:g}|L{','.join(f'{x:g}' for x in LEVELS)}"
     return "_" + hashlib.md5(key.encode()).hexdigest()[:8]
 
 
