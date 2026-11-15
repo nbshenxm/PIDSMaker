@@ -91,7 +91,7 @@ def bucket_depth(B, bucket_h=BUCKET_H):
 def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
                  max_gap_ns=HOUR, window_audits=50, B_auto=None, S_act=None,
                  flood_cap="auto", refund_delay_ns=0, act_key=None, act_seen=None,
-                 bucket_h=None, skip_keys=None, act_rate=None, release_h=None):
+                 bucket_h=None, skip_keys=None, act_rate=None, release_h=None, act_depth=1.0):
     """B_auto: if set, q_act is driven by a false-automation budget instead of a precision
     target: at most ~B_auto benign cases per day may be acted on automatically. Same
     label-free controller as the review budget (Proposition 1): every new tier-A case counts
@@ -129,7 +129,7 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
     tokens last; the rest join one summary item delivered with the next token. Without it, cases
     are admitted in arrival order. The bound is the same; the delay is at most release_h."""
     seen = set(act_seen or ())
-    act_tokens = 1.0
+    act_tokens = float(act_depth)
     hold, hold_slot = [], None                     # release_h: held cases of the open period
     summ, merge = None, {}                         # summary case awaiting a token; merged case -> summary
     REL = None if release_h is None else release_h * HOUR
@@ -156,7 +156,7 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
         if use_bucket:
             tokens = min(D, tokens + B * elapsed)
         if act_rate is not None:
-            act_tokens = min(1.0, act_tokens + act_rate * elapsed)
+            act_tokens = min(float(act_depth), act_tokens + act_rate * elapsed)
         if REL is not None and use_bucket:
             slot = int(tmax // REL)
             if hold and hold_slot is not None and slot != hold_slot:
@@ -421,6 +421,7 @@ def main():
     ap.add_argument("--kappa", type=float, default=1.645,
                     help="confidence-interval half-width in ensemble standard errors")
     ap.add_argument("--rules", default="ensemble,ensemble_upper,ensemble_ci,single_run")
+    ap.add_argument("--act_depth", type=float, default=1.0, help="act-tier token bucket depth (actions)")
     ap.add_argument("--act_rate", type=float, default=1.0,
                     help="act-tier token bucket: actions per day, depth one (<= 0: no bucket)")
     ap.add_argument("--no_act_cap", action="store_true",
@@ -519,7 +520,7 @@ def main():
                     bucket_h=None if static else BUCKET_H,
                     act_key=exe_key if "_novel" in base else None,
                     act_seen=seen_val if "_novel" in base else None,
-                    act_rate=args.act_rate if args.act_rate > 0 else None)
+                    act_rate=args.act_rate if args.act_rate > 0 else None, act_depth=args.act_depth)
                 r = evaluate(st, case_of, cases, B, tz, labels.get("attacks"))
                 fa = [c for c in cases if c["tier"] == "A" and not c["y"]]
                 nd = max(len(np.unique(day_of(st["t1"], tz))), 1)
