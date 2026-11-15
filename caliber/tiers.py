@@ -92,7 +92,7 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
                  max_gap_ns=HOUR, window_audits=50, B_auto=None, S_act=None,
                  flood_cap="auto", refund_delay_ns=0, act_key=None, act_seen=None,
                  bucket_h=None, skip_keys=None, act_rate=None, release_h=None, act_depth=1.0, demand=1.0,
-                 summarize=True, rev_floor=True):
+                 summarize=True, rev_floor=True, fresh_h=None):
     """B_auto: if set, q_act is driven by a false-automation budget instead of a precision
     target: at most ~B_auto benign cases per day may be acted on automatically. Same
     label-free controller as the review budget (Proposition 1): every new tier-A case counts
@@ -131,8 +131,13 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
     are admitted in arrival order. The bound is the same; the delay is at most release_h.
     summarize=False (with release_h): overflow is dismissed instead of summarized (no token).
     rev_floor=False (with release_h): no review threshold; every unit competes in its period's
-    score-ordered release (top-k per period with carry-over up to D); q_rev is not used."""
+    score-ordered release (top-k per period with carry-over up to D); q_rev is not used.
+    fresh_h (with release_h): a lineage that had a case admitted in the last fresh_h hours ranks
+    behind lineages that had not, so one foothold takes at most one slot per release while others
+    wait (decoy floods from few footholds; benign lineages that alert every hour)."""
     seen = set(act_seen or ())
+    last_rev = {} if fresh_h else None             # lineage key -> time of its last admitted case
+    fresh_ns = fresh_h * HOUR if fresh_h else None
     act_tokens = float(act_depth)
     hold, hold_slot = {}, None                     # release_h: held case -> its highest score so far
     summ, merge = None, {}                         # summary case awaiting a token; merged case -> summary
@@ -167,7 +172,7 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
             slot = int(tmax // REL)
             if hold and hold_slot is not None and slot != hold_slot:
                 tokens, summ = _release(hold, cases, tokens, (hold_slot + 1) * REL, summ, merge,
-                                        summarize)
+                                        summarize, last_rev, fresh_ns)
                 hold = {}
             if summ is not None and tokens >= 1.0:  # overflow: one summary item with the next token
                 cases[summ]["t_deliver"] = tmax
@@ -213,7 +218,8 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
                 if tier == "A" and act_rate is not None:
                     act_tokens -= 1.0
                 aud = tier == "A" and rng.random() < audit
-                cases.append({"tier": tier, "audited": aud, "y": False, "flood": False})
+                cases.append({"tier": tier, "audited": aud, "y": False, "flood": False,
+                              "key": int(keys[i])})
                 c = len(cases) - 1
                 open_case[kh] = c
                 opened += 1
@@ -282,7 +288,8 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
                 q_act -= 0.25 * eta_act
         # acting needs both: S_act >= max(q_act, q_rev); the state q_act itself is never clamped
     if REL is not None and use_bucket and hold:    # end of stream: release the last period
-        _release(hold, cases, tokens, (hold_slot + 1) * REL, summ, merge, summarize)
+        _release(hold, cases, tokens, (hold_slot + 1) * REL, summ, merge, summarize, last_rev,
+                 fresh_ns)
     if merge:                                      # units of merged cases belong to their summary
         mp = np.arange(len(cases), dtype=np.int64)
         for c, s in merge.items():
@@ -291,14 +298,23 @@ def replay_tiers(S, t, w, y, keys, B, q0, eta, pi, audit, eta_act, q_act0, rng,
     return case_of, cases
 
 
-def _release(hold, cases, tokens, t_rel, summ, merge, summarize=True):
+def _release(hold, cases, tokens, t_rel, summ, merge, summarize=True, last_rev=None, fresh_ns=None):
     """Admit held review cases at t_rel in descending score order while tokens last; the rest are
     merged into one summary case (created if needed), delivered as a single item with the next
-    token and never automated. Returns (tokens, summary case index or None)."""
-    for c, _ in sorted(hold.items(), key=lambda x: -x[1]):
+    token and never automated. Returns (tokens, summary case index or None).
+    last_rev / fresh_ns: a case whose lineage had a case admitted within fresh_ns before t_rel
+    ranks behind every case whose lineage had not (fresh lineages first, then by score)."""
+    def stale(c):
+        if last_rev is None:
+            return False
+        k = cases[c].get("key")
+        return k in last_rev and t_rel - last_rev[k] < fresh_ns
+    for c, _ in sorted(hold.items(), key=lambda x: (stale(x[0]), -x[1])):
         if tokens >= 1.0:
             tokens -= 1.0
             cases[c]["t_deliver"] = t_rel
+            if last_rev is not None:
+                last_rev[cases[c].get("key")] = t_rel
         elif not summarize:                        # overflow is dismissed (logged, no token)
             cases[c]["t_deliver"] = None
             cases[c]["tier"] = "C"
