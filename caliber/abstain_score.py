@@ -535,9 +535,11 @@ def scored_stream(kind, artifact_dir, system, dataset, labels, seeds=(0, 1, 2)):
     is cached under <artifact_dir>/caliber/cache (labels are re-applied on load)."""
     import pickle
     cdir = os.path.join(artifact_dir, "caliber", "cache")
-    _, fell = abstain_runs(density_runs(artifact_dir, system, dataset), seeds)
+    runs = density_runs(artifact_dir, system, dataset)
+    ab, fell = abstain_runs(runs, seeds)
     wtag = f"_w{'-'.join(map(str, fell))}" if fell else ""
-    cp = os.path.join(cdir, f"abstain_score_v8_{system}_{dataset}_s{'-'.join(map(str, seeds))}"
+    used = tuple(s for s in seeds if s in ab and s in runs.get("none", {})) or seeds  # key = runs scored
+    cp = os.path.join(cdir, f"abstain_score_v8_{system}_{dataset}_s{'-'.join(map(str, used))}"
                             f"{_variant()}{wtag}.pkl")
     st = None
     if os.path.exists(cp):
