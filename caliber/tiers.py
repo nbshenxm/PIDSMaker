@@ -84,6 +84,25 @@ def flood_cap_for(B):
 BUCKET_H = 8.0
 
 
+def lineage_count(score, t, key, thr, window_h=24.0):
+    """Per unit, causally: if the unit's score reaches thr, the number of units of its lineage
+    within the past window_h hours (itself included) whose score reaches thr; else 0. Sequential
+    evidence: attacks keep producing extreme units along one lineage within hours, while benign
+    extremes tend to be isolated."""
+    from collections import defaultdict, deque
+    score = np.asarray(score, float)
+    hot = np.flatnonzero(np.isfinite(score) & (score >= thr))
+    out = np.zeros(len(score))
+    win = defaultdict(deque)
+    for i in hot[np.argsort(t[hot], kind="stable")]:
+        d = win[key[i]]
+        while d and d[0] < t[i] - window_h * HOUR:
+            d.popleft()
+        d.append(t[i])
+        out[i] = len(d)
+    return out
+
+
 def bucket_depth(B, bucket_h=BUCKET_H):
     return max(1.0, B * bucket_h / 24.0)
 
@@ -565,6 +584,14 @@ def main():
         else:   # ensemble_ci: review on the upper bound, act on the lower bound
             S, cal = st["S"] + args.kappa * sem, st["S_val"] + args.kappa * sem_val
             S_act, cal_act = st["S"] - args.kappa * sem, st["S_val"] - args.kappa * sem_val
+        act_stat = os.environ.get("CALIBER_ACT_STAT", "unit")
+        if act_stat == "lincnt":
+            # corroborated judgment: how many units of the lineage within the past day the detector
+            # itself scores above its validation 99th percentile (only such units can act)
+            b_t, b_v = st["views"]["b"][1], st["views"]["b"][0]
+            q99 = float(np.nanquantile(b_v, 0.99))
+            S_act = lineage_count(b_t, st["t1"], lin, q99)
+            cal_act = lineage_count(b_v, st["t_val"], lin_val, q99)
         q0 = case_threshold(cal, st["t_val"], lin_val, B, nvd)   # B cases/day on validation
         cal = cal[np.isfinite(cal)]
         cal_act = cal if cal_act is None else cal_act[np.isfinite(cal_act)]
@@ -596,7 +623,8 @@ def main():
                 case_of, cases = replay_tiers(
                     S, st["t1"], st["w"], st["y"], lin, B, q0, 0.0 if static else review_step(cal, B),
                     2.0, audit if b_auto is not None else 0.0,
-                    (eta_a or 0.02) * sd, q_act0 if b_auto is not None else np.inf, rng,
+                    (eta_a or 0.02) * (1.0 if act_stat == "lincnt" else sd),   # count: 1 unit
+                    q_act0 if b_auto is not None else np.inf, rng,
                     B_auto=b_auto, S_act=S_act, flood_cap=None,
                     bucket_h=None if static else float(os.environ.get("CALIBER_BUCKET_H", BUCKET_H)),
                     act_key=exe_key if "_novel" in base else None,
