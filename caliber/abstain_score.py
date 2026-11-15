@@ -66,6 +66,13 @@ PREV_K = int(os.environ.get("CALIBER_PREV_K", "5"))   # prevalence: rarest disti
 NOV_GATE = os.environ.get("CALIBER_NOV_GATE", "all")
 NOV_VIEWS = os.environ.get("CALIBER_NOV_VIEWS", "p")
 USE_ABSTAIN = NOV_GATE != "all" or "a" in NOV_VIEWS   # rev-6 ablations read the abstaining runs
+# Simple alternatives (reviewer ablations). NOV_STAT: "sign" (multilevel sign test, default), "max"
+# (unit max edge novelty), "topk" (mean of the unit's 5 most novel interactions), "frac" (share of its
+# interactions above the validation 0.9 quantile). HIST: "excess" (novelty minus the entity's earlier
+# maximum, default) or "suppress" (no novelty credit once the entity showed validation-top-1% novelty
+# >= LAG_H earlier).
+NOV_STAT = os.environ.get("CALIBER_NOV_STAT", "sign")
+HIST = os.environ.get("CALIBER_HIST", "excess")
 
 
 def prevalence(rv, rt, meta, uv_idx, ut_idx, k=None):
@@ -231,6 +238,8 @@ def _variant():
         key += f"|{NOV_GATE}|{NOV_VIEWS}"
     if LAG_H != 24.0 or LEVELS != (0.5, 0.75, 0.9, 0.95, 0.99):     # sensitivity sweeps
         key += f"|lag{LAG_H:g}|L{','.join(f'{x:g}' for x in LEVELS)}"
+    if (NOV_STAT, HIST) != ("sign", "excess"):                       # simple alternatives
+        key += f"|{NOV_STAT}|{HIST}"
     return "_" + hashlib.md5(key.encode()).hexdigest()[:8]
 
 
@@ -321,9 +330,35 @@ def _mlv(df):
     return np.max([np.where(m > 0, -_log_tail(df[L].values, m, 1 - L), 0.0) for L in LEVELS], 0)
 
 
+def _alt_stat(ref, gate, nov, t90):
+    """Unit novelty under a simple alternative to the sign test (NOV_STAT), over the same
+    deduplicated interactions (partner, edge type) of the unit."""
+    parts = [pd.DataFrame({"w": ref["b"].values[gate], "node": ref[nc].values[gate],
+                           "partner": ref[pc].values[gate], "et": ref["edge_type"].values[gate],
+                           "nov": nov[gate]}) for nc, pc in (("srcnode", "dstnode"), ("dstnode", "srcnode"))]
+    d = pd.concat(parts, ignore_index=True).groupby(["w", "node", "partner", "et"], as_index=False)["nov"].max()
+    g = d.groupby(["w", "node"])["nov"]
+    if NOV_STAT == "max":
+        s = g.max()
+    elif NOV_STAT == "topk":
+        s = d.sort_values("nov", ascending=False).groupby(["w", "node"]).head(5).groupby(["w", "node"])["nov"].mean()
+    elif NOV_STAT == "frac":
+        s = (d.assign(x=(d["nov"].values > t90).astype(np.float64)).groupby(["w", "node"])["x"].mean())
+    else:
+        raise ValueError(NOV_STAT)
+    s.index.names = ["w", "node"]
+    return s
+
+
 def bulk_novelty(rv, gv, nv, rt, gt, nt, uv_idx, ut_idx):
     """Multilevel sign test over consensus-abstained edges; (validation, test) unit tails. Level-L
     threshold: the L-quantile of the novelty of validation consensus-abstained edges."""
+    if NOV_STAT != "sign":
+        t90 = np.quantile(nv[gv], 0.9) if gv.any() else np.inf
+        av = _alt_stat(rv, gv, nv, t90).reindex(uv_idx).fillna(0).values
+        at = _alt_stat(rt, gt, nt, t90).reindex(ut_idx).fillna(0).values
+        f = tail_fn(av)
+        return f(av), f(at)
     thr = {L: (np.quantile(nv[gv], L) if gv.any() else np.inf) for L in LEVELS}
     sv = _sign_counts(rv, gv, nv, thr).reindex(uv_idx).fillna(0)
     st = _sign_counts(rt, gt, nt, thr).reindex(ut_idx).fillna(0)
@@ -352,7 +387,10 @@ def lag_excess(node_v, t_v, nov_v, node_t, t_t, nov_t, lag_h=None):
     ok = (pos >= 0) & (gs[np.maximum(pos, 0)] == gs)
     prev = np.where(ok, cm[np.maximum(pos, 0)], 0.0)
     ex = np.empty(len(nv))
-    ex[o] = np.maximum(vs - np.maximum(prev, 0.0), 0.0)
+    if HIST == "suppress":                       # binary: once novel (validation top 1%), never again
+        ex[o] = np.where(prev >= np.log(100.0), 0.0, vs)
+    else:
+        ex[o] = np.maximum(vs - np.maximum(prev, 0.0), 0.0)
     return ex[:len(node_v)], ex[len(node_v):]
 
 
