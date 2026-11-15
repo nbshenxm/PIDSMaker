@@ -245,13 +245,16 @@ def inject_decoys(st, Z, keys, attacks, mode, rate, hours, seed=0):
     """Decoy flood (squealing, Patton et al. RAID'01): from each attack's start, the attacker
     raises `rate` decoy alerts per hour for `hours` hours, each scoring above every unit of that
     attack (worst case: decoys outrank the attack in every run). mode 'one': all decoys come from
-    the attack's own lineage (one foothold); 'many': each decoy from a distinct lineage."""
+    the attack's own lineage (one foothold); 'many': each decoy from a distinct lineage; 'f<N>':
+    decoys spread round-robin over N footholds (distinct lineages, none the attack's own).
+    The pooled scores st['S'] / st['U'] (abstain scorer) are extended the same way."""
     rng = np.random.default_rng(seed)
     yi = np.flatnonzero(st["y"])
     ua = unit_attacks(st["node"], st["t1"], yi, attacks)
     order = np.argsort(st["t1"], kind="stable")
     ts, ws = st["t1"][order], st["w"][order]
-    add_t, add_w, add_k, add_z = [], [], [], []
+    add_t, add_w, add_k, add_z, add_s = [], [], [], [], []
+    pooled = [k for k in ("S", "U") if k in st and len(st[k]) == len(st["t1"])]
     for k, a in enumerate(attacks):
         units = np.array([i for i, ks in ua.items() if k in ks], np.int64)
         if len(units) == 0:
@@ -265,9 +268,13 @@ def inject_decoys(st, Z, keys, attacks, mode, rate, hours, seed=0):
         add_w.append(ws[pos])
         if mode == "one":
             add_k.append(np.full(n, keys[units[np.argmax(zmax)]], np.int64))
+        elif mode.startswith("f"):
+            nf = max(int(mode[1:]), 1)
+            add_k.append(-((np.arange(n, dtype=np.int64) % nf) + 1 + 10**12 + k * 10**7))
         else:
             add_k.append(-(np.arange(n, dtype=np.int64) + 1 + 10**12 + k * 10**7))
         add_z.append(np.full(n, z))
+        add_s.append({p: np.full(n, float(np.nanmax(st[p][units])) + 0.01) for p in pooled})
     if not add_t:
         return st, Z, keys
     t_new, w_new = np.concatenate(add_t), np.concatenate(add_w)
@@ -277,6 +284,8 @@ def inject_decoys(st, Z, keys, attacks, mode, rate, hours, seed=0):
     st2["w"] = np.concatenate([st["w"], w_new])
     st2["y"] = np.concatenate([st["y"], np.zeros(n_new, bool)])
     st2["node"] = np.concatenate([st["node"], -(np.arange(n_new, dtype=np.int64) + 1 + 2 * 10**12)])
+    for p in pooled:
+        st2[p] = np.concatenate([st[p]] + [d[p] for d in add_s])
     Z2 = np.hstack([Z, np.tile(np.concatenate(add_z)[None, :], (Z.shape[0], 1))])
     return st2, Z2, np.concatenate([keys.astype(np.int64), np.concatenate(add_k)])
 
@@ -302,6 +311,8 @@ def main():
                          "abstention-aware scorer (caliber.abstain_score) on density runs; plain3: "
                          "its plain-surprise channel alone on the same units and seeds")
     ap.add_argument("--seeds", default="0,1,2", help="seeds for --scorer abstain/plain3")
+    ap.add_argument("--kappa", type=float, default=0.0,
+                    help="review on S + kappa * sem over runs (rev. 7: 0, review on S)")
     args = ap.parse_args()
     cache = os.path.join(args.artifact_dir, "caliber", "cache")
     members = data.group_manifests(data.load_manifests(
@@ -347,7 +358,9 @@ def main():
                 # the pooled scorer is not the mean of the per-run scores; its interval is
                 # computed in abstain_score (U = S + KAPPA * sd over runs / sqrt(R))
                 S, S_val, U, U_val = st["S"], st["S_val"], st["U"], st["U_val"]
-            elif len(subset) > 1:                   # review statistic: upper bound over runs
+                if args.kappa == 0:                 # rev. 7: review on S itself
+                    U, U_val = S, S_val
+            elif len(subset) > 1 and args.kappa > 0:  # review statistic: upper bound over runs
                 U = S + KAPPA * np.nan_to_num(np.nanstd(Z[subset], 0) / np.sqrt(len(subset)))
                 U_val = S_val + KAPPA * np.nan_to_num(np.nanstd(Zv[subset], 0) / np.sqrt(len(subset)))
             else:
