@@ -545,6 +545,10 @@ def scored_stream(kind, artifact_dir, system, dataset, labels, seeds=(0, 1, 2)):
     if os.path.exists(cp):
         with open(cp, "rb") as fh:
             st = pickle.load(fh)
+        if st["Z"].shape[0] != len(used):           # built before all runs were available
+            print(f"  stale cache ({st['Z'].shape[0]} runs, want {len(used)}): rebuilding", flush=True)
+            st = None
+    if st is not None:
         idx = pd.DataFrame({"t0": st["t0"], "t1": st["t1"]},
                            index=pd.MultiIndex.from_arrays([st["w"], st["node"]], names=["w", "node"]))
         st["y"] = unit_labels(idx, "entity_window", labels)
