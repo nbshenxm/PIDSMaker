@@ -72,6 +72,8 @@ USE_ABSTAIN = NOV_GATE != "all" or "a" in NOV_VIEWS   # rev-6 ablations read the
 # maximum, default) or "suppress" (no novelty credit once the entity showed validation-top-1% novelty
 # >= LAG_H earlier).
 B_SRC = os.environ.get("CALIBER_B_SRC", "base")
+DILUTE = float(os.environ.get("CALIBER_DILUTE", "0"))   # adaptive dilution of attack units (eval only)
+_ATTACK_MASK = None                                       # set by stream() when DILUTE > 0
 NOV_STAT = os.environ.get("CALIBER_NOV_STAT", "sign")
 HIST = os.environ.get("CALIBER_HIST", "excess")
 
@@ -241,6 +243,8 @@ def _variant():
         key += f"|lag{LAG_H:g}|L{','.join(f'{x:g}' for x in LEVELS)}"
     if (NOV_STAT, HIST) != ("sign", "excess"):                       # simple alternatives
         key += f"|{NOV_STAT}|{HIST}"
+    if DILUTE > 0:
+        key += f"|dil{DILUTE:g}"
     if B_SRC != "base":
         key += f"|b{B_SRC}"
     return "_" + hashlib.md5(key.encode()).hexdigest()[:8]
@@ -365,6 +369,11 @@ def bulk_novelty(rv, gv, nv, rt, gt, nt, uv_idx, ut_idx):
     thr = {L: (np.quantile(nv[gv], L) if gv.any() else np.inf) for L in LEVELS}
     sv = _sign_counts(rv, gv, nv, thr).reindex(uv_idx).fillna(0)
     st = _sign_counts(rt, gt, nt, thr).reindex(ut_idx).fillna(0)
+    if DILUTE > 0 and _ATTACK_MASK is not None:
+        # adaptive dilution: every attack unit adds DILUTE x m familiar interactions (novelty below
+        # every level), which raises m and leaves each k_L unchanged
+        st = st.copy()
+        st.loc[_ATTACK_MASK, "m"] = np.round(st.loc[_ATTACK_MASK, "m"].values * (1.0 + DILUTE))
     mv, mt = _mlv(sv), _mlv(st)
     f = tail_fn(mv)
     return f(mv), f(mt)
@@ -504,6 +513,8 @@ def stream(artifact_dir, system, dataset, labels, seeds=(0, 1, 2), base_group=BA
     plain_v, plain_t = plain_unit_scores(plain_src)
     _, meta = data.labels_for(pl[seeds[0]], artifact_dir)
     rar = prevalence(rv, rt, meta, uv.index, ut.index)
+    global _ATTACK_MASK
+    _ATTACK_MASK = np.asarray(unit_labels(ut, "entity_window", labels)).astype(bool) if DILUTE > 0 else None
     pooled = _score(seeds, A, P, plain_v, plain_t, rv, rt, uv, ut, rar)
     per = [_score((s,), A, P, plain_v, plain_t, rv, rt, uv, ut, rar) for s in seeds] if len(seeds) > 1 \
         else [pooled]
