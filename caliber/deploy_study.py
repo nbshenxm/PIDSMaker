@@ -195,7 +195,8 @@ def one_deployment(S, S_val, st, keys, B, nvd, policy, attacks, tz, cand=None,
             # caliber_hold<k>: the threshold targets k candidate cases per token (default 1), so the
             # hourly selection, not the threshold, decides which cases reach analysts
             k = float(policy[len("caliber_hold"):] or 1)
-            kw = {"bucket_h": bucket_h, "release_h": 1.0, "demand": k}
+            kw = {"bucket_h": bucket_h, "release_h": float(os.environ.get("CALIBER_RELEASE_H", "1")),
+                  "demand": k}
         else:                                       # static: as deployed today, no cap
             kw = {"flood_cap": "auto" if policy == "caliber_cap" else None}
         if views is not None and policy.startswith("caliber"):
