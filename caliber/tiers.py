@@ -651,7 +651,7 @@ def main():
         U_val = st["S_val"] + args.kappa * sem_val
         seen_val = set(exe_val[np.isfinite(U_val) & (U_val >= q0)].tolist())
         # lineage actions: process trees that alerted on the benign validation day(s)
-        lin_mode = os.environ.get("CALIBER_ACT_MODE") == "lineage"
+        lin_mode = os.environ.get("CALIBER_ACT_MODE") == "lineage" and has_lin
         seen_lin_val = set(np.asarray(lin_val)[np.isfinite(U_val) & (U_val >= q0)].tolist())
         # baseline: all alerts to triage (no automation); then false-automation budgets.
         # Warm start: the validation threshold that would give ~B_auto/day (top-1 when < 1/day).
@@ -683,12 +683,15 @@ def main():
                     else float(os.environ["CALIBER_RELEASE_H"]),
                     summarize=os.environ.get("CALIBER_SUMMARY", "1") == "1",
                     rev_floor=static or os.environ.get("CALIBER_FLOOR", "1") == "1",
-                    lineage_act=os.environ.get("CALIBER_ACT_MODE") == "lineage",
+                    # corroboration along a process tree needs process trees: without recorded
+                    # process creation (cases fall back to entities) the act tier stays off
+                    lineage_act=os.environ.get("CALIBER_ACT_MODE") == "lineage" and has_lin,
                     act_window_h=float(os.environ.get("CALIBER_ACT_WINDOW_H", "24")))
                 r = evaluate(st, case_of, cases, B, tz, labels.get("attacks"))
                 if any(c.get("action") for c in cases):   # lineage actions: one per process tree
                     fa = [c for c in cases if c.get("action") and not c["y"]]
                     r["actions"] = sum(bool(c.get("action")) for c in cases)
+                    r["false_actions"] = len(fa)
                 else:
                     fa = [c for c in cases if c["tier"] == "A" and not c["y"]]
                 nd = max(len(np.unique(day_of(st["t1"], tz))), 1)

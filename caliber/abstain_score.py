@@ -50,7 +50,10 @@ from caliber.pilot import normaliser, unit_labels, unit_table
 SNAP = int(os.environ.get("CALIBER_SNAP", "3"))
 LAST = int(os.environ.get("CALIBER_LAST", "0"))   # > 0: only the last LAST saved snapshots of a run
 THR = 0.5
-LEVELS = tuple(float(x) for x in os.environ.get("CALIBER_LEVELS", "0.5,0.75,0.9,0.95,0.99").split(","))
+# levels of the multilevel novelty test; default since 2026-11-17 extends to the extreme tail (0.999,
+# 0.9999), which with the peak (NOV_STAT=signmax) dominated on every attack (notes, 2026-11-17)
+LEVELS = tuple(float(x) for x in os.environ.get(
+    "CALIBER_LEVELS", "0.5,0.75,0.9,0.95,0.99,0.999,0.9999").split(","))
 SPEC_ABSTAIN = os.environ.get("CALIBER_ABSTAIN_SPEC", '{"o":3}')
 BASE_GROUP = "da39a3ee5e"
 KAPPA = 1.645
