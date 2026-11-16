@@ -636,6 +636,14 @@ def main():
             # itself scores above its validation 99th percentile (only such units can act)
             b_t, b_v = st["views"]["b"][1], st["views"]["b"][0]
             q99 = float(np.nanquantile(b_v, 0.99))
+            if os.environ.get("CALIBER_ACT_NEW", "0") == "1":
+                # count only alerts that are extreme to the detector AND new in its features: routine
+                # noise (extreme but familiar, e.g. a message bus) never builds evidence for action
+                nq = float(os.environ.get("CALIBER_ACT_NOVQ", "0.9"))
+                n_t, n_v = st["views"]["nov"][1], st["views"]["nov"][0]
+                qn = float(np.nanquantile(n_v, nq))
+                b_t = np.where(np.nan_to_num(n_t, nan=-np.inf) >= qn, b_t, -np.inf)
+                b_v = np.where(np.nan_to_num(n_v, nan=-np.inf) >= qn, b_v, -np.inf)
             S_act = lineage_count(b_t, st["t1"], lin, q99)
             cal_act = lineage_count(b_v, st["t_val"], lin_val, q99)
         q0 = case_threshold(cal, st["t_val"], lin_val, B, nvd)   # B cases/day on validation
