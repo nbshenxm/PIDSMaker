@@ -461,6 +461,18 @@ def evaluate(st, case_of, cases, B, tz, attacks=None):
     for d, cs in by_day.items():
         reviewed |= set(sorted(cs, key=lambda c: first_t[c])[: int(B)])
     rev_ent = {node[i] for i in att_units if case_of[i] in reviewed}
+    exposed = None
+    if attacks and "decoy_of" in st:
+        # decoy floods: a campaign is exposed when an analyst reviews, or an action covers, a case
+        # holding the attack or one of its decoys; actions on decoy trees contain the footholds
+        dec = st["decoy_of"]
+        hit = [i for i in np.flatnonzero(case_of >= 0)
+               if autoA[case_of[i]] or case_of[i] in reviewed]
+        ua_h = unit_attacks(node, t, [i for i in hit if y[i]], attacks)
+        exposed = {int(dec[i]) for i in hit if dec[i] >= 0} | {k for ks in ua_h.values() for k in ks}
+        present_att = {k for ks in unit_attacks(node, t, np.flatnonzero(y), attacks).values()
+                       for k in ks}
+        footholds_acted = len({int(c["key"]) for c in cases if c.get("action") and c["key"] <= -10**12})
     # per day (convergence of both controllers): benign review cases, false automations
     per_day = {}
     for c, tc in first_t.items():
@@ -481,6 +493,8 @@ def evaluate(st, case_of, cases, B, tz, attacks=None):
         "attack_entities_reviewed": len(rev_ent - auto_ent),
         "attack_entities_handled": len(auto_ent | rev_ent),
         "attack_entities": len(set(node[y])),
+        **({} if exposed is None else {
+            "attacks_exposed": len(exposed & present_att), "footholds_acted": footholds_acted}),
         **_attack_level(attacks, node, t, np.flatnonzero(y),
                         [i for i in att_units if autoA[case_of[i]] or case_of[i] in reviewed],
                         [i for i in att_units if autoA[case_of[i]]],
@@ -555,6 +569,31 @@ def _with_borrower(labels, manifest, artifact_dir):
     return labels
 
 
+def add_flood(st, lin, exe_key, attacks, mode, rate=1000.0, hours=24.0):
+    """Decoy flood (deploy_study.inject_decoys) for the act-tier replay: decoys also outscore every
+    unit of their attack in each signal view (detector score, novelty), the worst case for review."""
+    from caliber.deploy_study import inject_decoys
+    n0 = len(st["t1"])
+    st2, Z2, lin2 = inject_decoys(st, st["Z"], np.asarray(lin, np.int64), attacks, mode, rate, hours)
+    n_new = len(st2["t1"]) - n0
+    if n_new == 0:
+        return st, lin, exe_key
+    st2["Z"] = Z2
+    att = st2["decoy_of"][n0:]
+    ua = unit_attacks(st["node"], st["t1"], np.flatnonzero(st["y"]), attacks)
+    units = {k: np.array([i for i, ks in ua.items() if k in ks], np.int64) for k in np.unique(att)}
+    if "views" in st:
+        views = {}
+        for name, (v_val, v_t) in st["views"].items():
+            ext = np.full(n_new, np.nan)
+            for k, u in units.items():
+                if len(u) and np.isfinite(v_t[u]).any():
+                    ext[att == k] = float(np.nanmax(v_t[u])) + 0.01
+            views[name] = (v_val, np.concatenate([v_t, ext]))
+        st2["views"] = views
+    return st2, lin2, np.concatenate([np.asarray(exe_key, np.int64), lin2[n0:]])
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--artifact_dir", required=True)
@@ -599,6 +638,14 @@ def main():
     lin_val, _ = case_keys(st, args.artifact_dir, args.dataset, meta, split="val")
     exe_key, exe_val = executable_keys(st, args.artifact_dir, args.dataset, meta)
     nvd = max(len(members[0].get("val_dates", [])), 1)
+    y_rep = st["y"]
+    flood = os.environ.get("CALIBER_FLOOD")         # e.g. f1, f10, f100, many
+    if flood and labels.get("attacks"):
+        st, lin, exe_key = add_flood(st, lin, exe_key, labels["attacks"], flood,
+                                     float(os.environ.get("CALIBER_FLOOD_RATE", "1000")))
+        # an analyst who checks an action on a decoy's process tree finds attacker activity: the
+        # action is confirmed (refunded); decoys never count as attack units for reach
+        y_rep = st["y"] | (st["decoy_of"] >= 0)
     out = {}
     print(f"== {args.system}/{args.dataset} B={B} lineage={'yes' if has_lin else 'no'}")
     M = st["Z"].shape[0]
@@ -678,7 +725,7 @@ def main():
                 ka = max(int((b_auto or 1) * nvd), 1)
                 q_act0 = float(np.sort(cal_act)[-ka])
                 case_of, cases = replay_tiers(
-                    S, st["t1"], st["w"], st["y"], lin, B, q0, 0.0 if static else review_step(cal, B),
+                    S, st["t1"], st["w"], y_rep, lin, B, q0, 0.0 if static else review_step(cal, B),
                     2.0, audit if b_auto is not None else 0.0,
                     (eta_a or 0.02) * (1.0 if act_stat == "lincnt" else sd),   # count: 1 unit
                     q_act0 if b_auto is not None else np.inf, rng,
