@@ -111,7 +111,18 @@ def _add_decoys(case_att, case_idx, st):
             case_att[case_idx[i]].add(-int(d[i]) - 1)
 
 
-def fixed_threshold_cases(cand, policy, q0, B):
+def routine_level(S_val, t_val, keys_val, q):
+    """Routine level: the q-quantile of the benign validation cases' scores (case = process tree x
+    hour, best unit). A case below it is set aside as routine and never competes for analysts."""
+    hour = (np.asarray(t_val) // HOUR).astype(np.int64)
+    _, inv = np.unique(np.stack([np.asarray(keys_val).astype(np.int64), hour]), axis=1, return_inverse=True)
+    inv = inv.ravel()
+    cs = np.full(inv.max() + 1, -np.inf)
+    np.maximum.at(cs, inv, np.nan_to_num(S_val, nan=-np.inf))
+    return float(np.quantile(cs[np.isfinite(cs)], q))
+
+
+def fixed_threshold_cases(cand, policy, q0, B, tau=-np.inf):
     """Cases alerted by a threshold that changes at most once per day."""
     score, open_t, case_att, days = cand
     if policy == "static":
@@ -139,7 +150,8 @@ def fixed_threshold_cases(cand, policy, q0, B):
             credit += B * R / 24.0                   # fractional quota carries over; idle
             k = int(credit)                          # capacity does not accumulate
             credit -= k
-            keep[ix[np.argsort(-score[ix])[:k]]] = True
+            top = ix[score[ix] >= tau]                # routine cases never compete
+            keep[top[np.argsort(-score[top])[:k]]] = True
             release[ix] = (h + 1) * R * HOUR
         return release[keep], score[keep], [case_att[i] for i in np.flatnonzero(keep)]
     elif policy == "daytopB":                       # Ho et al. '17: the day's top B, at day end
@@ -207,7 +219,9 @@ def one_deployment(S, S_val, st, keys, B, nvd, policy, attacks, tz, cand=None,
     n_flood = 0
     summary = None                                  # per case: is it a summary (bulk) item
     if policy in ("hindsight", "prevday", "daytopB", "hourtopB") or policy.startswith("ptopB"):
-        open_t, score, case_att = fixed_threshold_cases(cand, policy, q0, B)
+        rq = float(os.environ.get("CALIBER_ROUTINE_Q", "0"))
+        tau = routine_level(S_val, st["t_val"], st["node_val"] if keys_val is None else keys_val, rq)             if rq > 0 else -np.inf
+        open_t, score, case_att = fixed_threshold_cases(cand, policy, q0, B, tau)
     else:
         eta = 0.0 if policy == "static" else review_step(cal, B)
         if policy == "caliber":
