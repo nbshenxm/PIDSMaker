@@ -32,7 +32,7 @@ from caliber.tiers import (BUCKET_H, KAPPA, _with_borrower, case_threshold, repl
                            unit_attacks)
 
 BUDGETS = [20, 50, 100, 200, 500]
-MAX_WAIT_DAYS = 3
+MAX_WAIT_DAYS = float(os.environ.get("CALIBER_MAX_WAIT_D", "3"))   # queue expiry
 
 
 def cases_of(case_of, cases, S, t, node, y, attacks):
@@ -127,6 +127,8 @@ def fixed_threshold_cases(cand, policy, q0, B, tau=-np.inf):
     score, open_t, case_att, days = cand
     if policy == "static":
         q_of_day = {d: q0 for d in np.unique(days)}
+    elif policy == "routine":                       # every non-routine case enters the ranked queue
+        q_of_day = {d: tau for d in np.unique(days)}
     elif policy == "hindsight":                     # label-free, but uses the whole test period
         nd = len(np.unique(days))
         k = min(max(int(B * nd), 1), len(score))
@@ -218,7 +220,7 @@ def one_deployment(S, S_val, st, keys, B, nvd, policy, attacks, tz, cand=None,
     q0 = case_threshold(S_val, st["t_val"], st["node_val"] if keys_val is None else keys_val, B, nvd)
     n_flood = 0
     summary = None                                  # per case: is it a summary (bulk) item
-    if policy in ("hindsight", "prevday", "daytopB", "hourtopB") or policy.startswith("ptopB"):
+    if policy in ("hindsight", "prevday", "daytopB", "hourtopB", "routine") or policy.startswith("ptopB"):
         rq = float(os.environ.get("CALIBER_ROUTINE_Q", "0"))
         tau = routine_level(S_val, st["t_val"], st["node_val"] if keys_val is None else keys_val, rq)             if rq > 0 else -np.inf
         open_t, score, case_att = fixed_threshold_cases(cand, policy, q0, B, tau)
