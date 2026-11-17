@@ -77,6 +77,7 @@ USE_ABSTAIN = NOV_GATE != "all" or "a" in NOV_VIEWS   # rev-6 ablations read the
 # >= LAG_H earlier).
 B_SRC = os.environ.get("CALIBER_B_SRC", "base")
 DILUTE = float(os.environ.get("CALIBER_DILUTE", "0"))   # adaptive dilution of attack units (eval only)
+DILUTE_MODE = os.environ.get("CALIBER_DILUTE_MODE", "below")   # padding novelty: "below" or "typical"
 _ATTACK_MASK = None                                       # set by stream() when DILUTE > 0
 NOV_STAT = os.environ.get("CALIBER_NOV_STAT", "signmax")
 HIST = os.environ.get("CALIBER_HIST", "excess")
@@ -248,7 +249,7 @@ def _variant():
     if (NOV_STAT, HIST) != ("sign", "excess"):                       # simple alternatives
         key += f"|{NOV_STAT}|{HIST}"
     if DILUTE > 0:
-        key += f"|dil{DILUTE:g}"
+        key += f"|dil{DILUTE:g}" + ("" if DILUTE_MODE == "below" else f"|{DILUTE_MODE}")
     if B_SRC != "base":
         key += f"|b{B_SRC}"
     return "_" + hashlib.md5(key.encode()).hexdigest()[:8]
@@ -365,7 +366,7 @@ def _alt_stat(ref, gate, nov, t90, stat=None):
 def bulk_novelty(rv, gv, nv, rt, gt, nt, uv_idx, ut_idx):
     """Multilevel sign test over consensus-abstained edges; (validation, test) unit tails. Level-L
     threshold: the L-quantile of the novelty of validation consensus-abstained edges."""
-    if NOV_STAT not in ("sign", "signmax"):
+    if NOV_STAT not in ("sign", "signmax", "count", "signcount"):
         t90 = np.quantile(nv[gv], 0.9) if gv.any() else np.inf
         av = _alt_stat(rv, gv, nv, t90).reindex(uv_idx).fillna(0).values
         at = _alt_stat(rt, gt, nt, t90).reindex(ut_idx).fillna(0).values
@@ -375,12 +376,30 @@ def bulk_novelty(rv, gv, nv, rt, gt, nt, uv_idx, ut_idx):
     sv = _sign_counts(rv, gv, nv, thr).reindex(uv_idx).fillna(0)
     st = _sign_counts(rt, gt, nt, thr).reindex(ut_idx).fillna(0)
     if DILUTE > 0 and _ATTACK_MASK is not None:
-        # adaptive dilution: every attack unit adds DILUTE x m familiar interactions (novelty below
-        # every level), which raises m and leaves each k_L unchanged
+        # adaptive dilution: every attack unit adds DILUTE x m familiar interactions. "below": novelty
+        # below every level (raises m, leaves each k_L unchanged); "typical": drawn like benign
+        # interactions, so a fraction 1-L of them exceed level L (the null rate)
         st = st.copy()
-        st.loc[_ATTACK_MASK, "m"] = np.round(st.loc[_ATTACK_MASK, "m"].values * (1.0 + DILUTE))
+        m0 = st.loc[_ATTACK_MASK, "m"].values
+        st.loc[_ATTACK_MASK, "m"] = np.round(m0 * (1.0 + DILUTE))
+        if DILUTE_MODE == "typical":
+            for L in LEVELS:
+                st.loc[_ATTACK_MASK, L] = st.loc[_ATTACK_MASK, L].values + np.round(m0 * DILUTE * (1 - L))
     mv, mt = _mlv(sv), _mlv(st)
     f = tail_fn(mv)
+    if NOV_STAT in ("count", "signcount"):
+        # how MANY of the unit's interactions exceed each level, against the benign units' counts
+        # at that level (calibrated per level, max over levels, recalibrated). Adding interactions
+        # never lowers a count, so padding cannot dilute it.
+        fl = {L: tail_fn(sv[L].values.astype(np.float64)) for L in LEVELS}
+        kv = np.max([fl[L](sv[L].values) for L in LEVELS], 0)
+        kt = np.max([fl[L](st[L].values) for L in LEVELS], 0)
+        fk = tail_fn(kv)
+        if NOV_STAT == "count":
+            return fk(kv), fk(kt)
+        cv, ct = np.maximum(f(mv), fk(kv)), np.maximum(f(mt), fk(kt))
+        fc = tail_fn(cv)
+        return fc(cv), fc(ct)
     if NOV_STAT == "signmax":
         # the more alarming of bulk evidence and the unit's most novel interaction (calibrated
         # tails, max recalibrated): padding a unit with familiar interactions dilutes the bulk test
