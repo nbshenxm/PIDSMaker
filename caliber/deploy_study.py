@@ -33,10 +33,24 @@ from caliber.tiers import (BUCKET_H, KAPPA, _with_borrower, case_threshold, repl
 
 BUDGETS = [20, 50, 100, 200, 500]
 MAX_WAIT_DAYS = float(os.environ.get("CALIBER_MAX_WAIT_D", "3"))   # queue expiry
+CATCH_K = int(os.environ.get("CALIBER_CATCH_K", "0"))   # caught only through a case's top-K units
+
+
+def _top_k(case_idx, S, idx):
+    """Units idx whose score is among the CATCH_K highest of their case (all if CATCH_K = 0): an
+    analyst examines a case's top units, so an attack counts as caught only through them."""
+    if not CATCH_K or len(idx) == 0:
+        return np.ones(len(idx), bool)
+    c, s = case_idx[idx], np.nan_to_num(S[idx], nan=-np.inf)
+    o = np.lexsort((-s, c))
+    r = np.empty(len(idx), np.int64)
+    first = np.r_[0, np.flatnonzero(np.diff(c[o])) + 1]
+    r[o] = np.arange(len(o)) - np.repeat(first, np.diff(np.r_[first, len(o)]))
+    return r < CATCH_K
 
 
 def cases_of(case_of, cases, S, t, node, y, attacks):
-    """Per case: open time, priority score, the attacks it contains."""
+    """Per case: open time, priority score, the attacks it contains (through its top units)."""
     n = len(cases)
     open_t = np.full(n, np.inf)
     score = np.full(n, -np.inf)
@@ -44,7 +58,8 @@ def cases_of(case_of, cases, S, t, node, y, attacks):
     np.minimum.at(open_t, case_of[idx], t[idx])
     np.maximum.at(score, case_of[idx], S[idx])
     case_att = [set() for _ in range(n)]
-    for i, ks in unit_attacks(node, t, idx[y[idx]], attacks).items():
+    att = idx[y[idx] & _top_k(case_of, S, idx)]
+    for i, ks in unit_attacks(node, t, att, attacks).items():
         case_att[case_of[i]].update(ks)
     return open_t, score, case_att
 
@@ -94,7 +109,9 @@ def candidate_cases(S, st, keys, attacks, tz):
     np.maximum.at(score, inv, S)
     np.minimum.at(open_t, inv, st["t1"])
     case_att = [set() for _ in range(n)]
-    for i, ks in unit_attacks(st["node"], st["t1"], np.flatnonzero(st["y"]), attacks).items():
+    allu = np.arange(len(inv))
+    att = allu[st["y"].astype(bool) & _top_k(inv, S, allu)]
+    for i, ks in unit_attacks(st["node"], st["t1"], att, attacks).items():
         case_att[inv[i]].update(ks)
     _add_decoys(case_att, inv, st)
     return score, open_t, case_att, day_of(open_t, tz)
