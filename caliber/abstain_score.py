@@ -366,7 +366,7 @@ def _alt_stat(ref, gate, nov, t90, stat=None):
 def bulk_novelty(rv, gv, nv, rt, gt, nt, uv_idx, ut_idx):
     """Multilevel sign test over consensus-abstained edges; (validation, test) unit tails. Level-L
     threshold: the L-quantile of the novelty of validation consensus-abstained edges."""
-    if NOV_STAT not in ("sign", "signmax", "count", "signcount"):
+    if NOV_STAT not in ("sign", "signmax", "count", "signcount", "signmaxcount"):
         t90 = np.quantile(nv[gv], 0.9) if gv.any() else np.inf
         av = _alt_stat(rv, gv, nv, t90).reindex(uv_idx).fillna(0).values
         at = _alt_stat(rt, gt, nt, t90).reindex(ut_idx).fillna(0).values
@@ -387,7 +387,7 @@ def bulk_novelty(rv, gv, nv, rt, gt, nt, uv_idx, ut_idx):
                 st.loc[_ATTACK_MASK, L] = st.loc[_ATTACK_MASK, L].values + np.round(m0 * DILUTE * (1 - L))
     mv, mt = _mlv(sv), _mlv(st)
     f = tail_fn(mv)
-    if NOV_STAT in ("count", "signcount"):
+    if NOV_STAT in ("count", "signcount", "signmaxcount"):
         # how MANY of the unit's interactions exceed each level, against the benign units' counts
         # at that level (calibrated per level, max over levels, recalibrated). Adding interactions
         # never lowers a count, so padding cannot dilute it.
@@ -398,6 +398,11 @@ def bulk_novelty(rv, gv, nv, rt, gt, nt, uv_idx, ut_idx):
         if NOV_STAT == "count":
             return fk(kv), fk(kt)
         cv, ct = np.maximum(f(mv), fk(kv)), np.maximum(f(mt), fk(kt))
+        if NOV_STAT == "signmaxcount":
+            pv = _alt_stat(rv, gv, nv, None, "max").reindex(uv_idx).fillna(0).values
+            pt = _alt_stat(rt, gt, nt, None, "max").reindex(ut_idx).fillna(0).values
+            fp = tail_fn(pv)
+            cv, ct = np.maximum(cv, fp(pv)), np.maximum(ct, fp(pt))
         fc = tail_fn(cv)
         return fc(cv), fc(ct)
     if NOV_STAT == "signmax":
