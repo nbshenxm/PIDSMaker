@@ -181,6 +181,8 @@ def transform(cfg, rows, date):
         attack_edge = (src in gt or dst in gt) and _in_attack(ctx, t)
         if attack_edge and src in procs:            # an attack process acts
             acts = ctx["actions"]
+            if spec.get("guide") and spec.get("borrow") and ctx["borrower"] is not None:
+                src_node, src = ctx["borrower"]     # guided: the host process also issues the padding
             if n_dil and acts:
                 for i in range(n_dil):
                     a_op, a_dst = acts[(ctx["n_syn"] + i) % len(acts)]
