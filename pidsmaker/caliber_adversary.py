@@ -69,9 +69,15 @@ def prepare(cfg, indexid2msg):
     if spec.get("guide"):
         with open(spec["guide"], encoding="utf-8") as f:
             guide = json.load(f)
-        top_label["subject"] = guide["proc_label"]
-        if guide.get("file_label"):
-            top_label["file"] = guide["file_label"]
+        # labels may be given directly or as a node whose label the table holds (CADETS: the
+        # analysis metadata has no process names, the construction table does)
+        for t, lk, nk in (("subject", "proc_label", "proc_node"), ("file", "file_label", "file_node")):
+            lab = guide.get(lk)
+            if not lab and guide.get(nk) is not None and str(guide[nk]) in indexid2msg:
+                lab = indexid2msg[str(guide[nk])][1]
+            if lab:
+                top_label[t] = lab
+                guide[lk] = lab
     indexid2msg = dict(indexid2msg)
     renamed = 0
     if spec.get("rename"):
@@ -98,7 +104,9 @@ def prepare(cfg, indexid2msg):
         if acts:
             ctx["actions"] = acts
         ctx["guide_procs"] = {str(nid) for nid, (t, l) in indexid2msg.items()
-                              if t == "subject" and l == guide["proc_label"] and str(nid) not in gt}
+                              if t == "subject" and l == guide.get("proc_label") and str(nid) not in gt}
+        if guide.get("proc_node") is not None:
+            ctx["guide_procs"].add(str(guide["proc_node"]))
         log(f"[adversary] guide proc={guide['proc_label']!r} file={guide.get('file_label')!r} "
             f"actions={len(acts)} guide_procs={len(ctx['guide_procs'])}")
     ctx["prime_rows"] = _priming_rows(ctx, spec.get("prime", 0))
