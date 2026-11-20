@@ -20,6 +20,12 @@ host can perform; nothing deletes or edits recorded events of other principals.
   --adversary='{"prime": h}'
       Each attack process reads frequent benign files at a steady rate during the h hours before
       its attack starts: it builds a benign-looking history first (temporal-memory priming).
+  --adversary='{"guide": "/path/guide.json", ...}'
+      Detector-guided mimicry (optimized against the frozen model; caliber_smoke/guide_build.py):
+      the guide names the benign program the detector predicts best on the validation days, the
+      file label it touches with the lowest loss, and its best-predicted (relation, target)
+      actions. With a guide, rename uses these labels, borrow injects into the busiest process
+      of that program, and dilute/prime pad with its actions instead of reads of frequent files.
 Keys can be combined. The spec enters the construction hash only when set (pipeline.py).
 """
 
@@ -59,6 +65,13 @@ def prepare(cfg, indexid2msg):
     for (ntype, label), c in benign_labels.most_common():
         top_label.setdefault(ntype, label)
     seen_benign = {lab for (_, lab) in benign_labels}
+    guide = None
+    if spec.get("guide"):
+        with open(spec["guide"], encoding="utf-8") as f:
+            guide = json.load(f)
+        top_label["subject"] = guide["proc_label"]
+        if guide.get("file_label"):
+            top_label["file"] = guide["file_label"]
     indexid2msg = dict(indexid2msg)
     renamed = 0
     if spec.get("rename"):
@@ -77,6 +90,17 @@ def prepare(cfg, indexid2msg):
     ctx = {"spec": spec, "gt": gt, "files": files[:200], "attack_procs": attack_procs,
            "attacks": attacks, "borrower": None, "n_syn": 0, "test_dates": set(cfg.dataset.test_dates)}
     ctx["proc_set"] = set(attack_procs)
+    ctx["actions"] = [("EVENT_READ", f) for f in ctx["files"]]
+    ctx["guide_procs"] = None
+    if guide:
+        acts = [(op, str(dst)) for op, dst in guide["actions"]
+                if str(dst) in indexid2msg and str(dst) not in gt]
+        if acts:
+            ctx["actions"] = acts
+        ctx["guide_procs"] = {str(nid) for nid, (t, l) in indexid2msg.items()
+                              if t == "subject" and l == guide["proc_label"] and str(nid) not in gt}
+        log(f"[adversary] guide proc={guide['proc_label']!r} file={guide.get('file_label')!r} "
+            f"actions={len(acts)} guide_procs={len(ctx['guide_procs'])}")
     ctx["prime_rows"] = _priming_rows(ctx, spec.get("prime", 0))
     log(f"[adversary] spec={spec} renamed={renamed} attack_procs={len(attack_procs)} "
         f"benign_file_pool={len(ctx['files'])} priming_events={len(ctx['prime_rows'])}")
@@ -109,15 +133,17 @@ def _syn(ctx, src, dst, op, t):
 
 
 def _priming_rows(ctx, hours):
-    if not hours or not ctx["files"] or not ctx["attack_procs"]:
+    acts = ctx["actions"]
+    if not hours or not acts or not ctx["attack_procs"]:
         return []
     rows = []
     for start, _ in ctx["attacks"]:
-        n = int(hours * 60)                       # one read per minute per attack process
+        n = int(hours * 60)                       # one action per minute per attack process
         for p in ctx["attack_procs"]:
             for i in range(n):
                 t = start - hours * NS_H + i * (hours * NS_H // max(n, 1))
-                rows.append(_syn(ctx, p, ctx["files"][i % len(ctx["files"])], "EVENT_READ", t))
+                op, dst = acts[i % len(acts)]
+                rows.append(_syn(ctx, p, dst, op, t))
     rows.sort(key=lambda r: r[6])
     return rows
 
@@ -133,7 +159,10 @@ def transform(cfg, rows, date):
         return rows
     spec, gt, procs = ctx["spec"], ctx["gt"], ctx["proc_set"]
     if spec.get("borrow") and ctx["borrower"] is None:
-        cnt = Counter((r[0], r[1]) for r in rows if r[1] not in gt)
+        gp = ctx["guide_procs"]
+        cnt = Counter((r[0], r[1]) for r in rows if r[1] not in gt and (not gp or r[1] in gp))
+        if not cnt:
+            cnt = Counter((r[0], r[1]) for r in rows if r[1] not in gt)
         if cnt:
             ctx["borrower"] = cnt.most_common(1)[0][0]       # (node uuid, index id)
             _save(cfg, ctx)
@@ -143,10 +172,11 @@ def transform(cfg, rows, date):
         src_node, src, op, dst_node, dst, ev, t, _id = r
         attack_edge = (src in gt or dst in gt) and _in_attack(ctx, t)
         if attack_edge and src in procs:            # an attack process acts
-            if n_dil and ctx["files"]:
+            acts = ctx["actions"]
+            if n_dil and acts:
                 for i in range(n_dil):
-                    out.append(_syn(ctx, src, ctx["files"][(ctx["n_syn"] + i) % len(ctx["files"])],
-                                    "EVENT_READ", t - (n_dil - i)))
+                    a_op, a_dst = acts[(ctx["n_syn"] + i) % len(acts)]
+                    out.append(_syn(ctx, src, a_dst, a_op, t - (n_dil - i)))
             if spec.get("substitute") and op in EQUIV:
                 op = EQUIV[op]
             if spec.get("borrow") and ctx["borrower"] is not None:
