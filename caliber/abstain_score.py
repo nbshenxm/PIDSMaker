@@ -705,10 +705,12 @@ def scored_stream(kind, artifact_dir, system, dataset, labels, seeds=(0, 1, 2)):
         st["y"] = unit_labels(idx, "entity_window", labels)
     if st is None:
         st = stream(artifact_dir, system, dataset, labels, seeds=seeds)
-        os.makedirs(cdir, exist_ok=True)
-        with open(cp + ".tmp", "wb") as fh:
-            pickle.dump(st, fh, protocol=4)
-        os.replace(cp + ".tmp", cp)
+        # CALIBER_CACHE_WRITE=0: one-off sensitivity variants are not cached (block quota)
+        if os.environ.get("CALIBER_CACHE_WRITE", "1") != "0":
+            os.makedirs(cdir, exist_ok=True)
+            with open(cp + ".tmp", "wb") as fh:
+                pickle.dump(st, fh, protocol=4)
+            os.replace(cp + ".tmp", cp)
     _recombine(st)                                  # unit score under CALIBER_COMBINE (cache-safe)
     R = st["Z"].shape[0]                            # interval over runs (recomputed on load)
     for sfx in ("", "_val"):
