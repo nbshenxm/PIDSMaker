@@ -32,7 +32,12 @@ validation tail -log P_val(X >= x) (interpolated empirical tail, exponential bey
   rar     prevalence of the unit's actions in the benign validation days (NoDoze-style): sum of
           -log smoothed frequency of its PREV_K rarest distinct (source executable, event type,
           target type) actions
-Score: F = b + nov + rar (Fisher-style sum of validation -log p); r = tail_F(F) for the controller.
+Score (rev. 8, CALIBER_COMBINE=lse): F = M + rar with M = log(e^b + e^nov). b and nov are two views of
+the same model (how surprising an event is, how new it is to the representation), so the model's
+evidence is counted once: M is the harmonic-mean p-value combination of the two views (Wilson 2019,
+valid under dependence), close to the stronger view; rarity is evidence from the environment and is
+added. CALIBER_COMBINE=sum restores rev. 7, F = b + nov + rar, which counted the model twice.
+r = tail_F(F) for the controller.
 Cases: the partner (lineage key) is the other endpoint of the unit's most surprising edge under the
 plain detector. Run-level interval: the scorer on each seed alone gives r_m;
 U = r + KAPPA sd_m(r_m)/sqrt(R).
@@ -80,6 +85,18 @@ DILUTE = float(os.environ.get("CALIBER_DILUTE", "0"))   # adaptive dilution of a
 DILUTE_MODE = os.environ.get("CALIBER_DILUTE_MODE", "below")   # padding novelty: "below" or "typical"
 _ATTACK_MASK = None                                       # set by stream() when DILUTE > 0
 NOV_STAT = os.environ.get("CALIBER_NOV_STAT", "signmax")
+COMBINE = os.environ.get("CALIBER_COMBINE", "lse")      # "lse" (rev. 8) or "sum" (rev. 7)
+
+
+def model_view(b, nov):
+    """The model's evidence: both views of the detector combined once (rev. 8), or summed (rev. 7)."""
+    b, nov = np.asarray(b, np.float64), np.asarray(nov, np.float64)
+    return np.logaddexp(b, nov) if COMBINE == "lse" else b + nov
+
+
+def combine(b, nov, rar):
+    """Unit score F from the three validation -log p signals."""
+    return model_view(b, nov) + np.asarray(rar, np.float64)
 HIST = os.environ.get("CALIBER_HIST", "excess")
 
 
@@ -503,8 +520,8 @@ def _score(seeds, A, P, plain_v, plain_t, rv, rt, uv, ut, rar):
     fb = tail_fn(bv_all.values)
     b_v = fb(np.nan_to_num(bv_all.reindex(uv.index).values, nan=-1e9))
     b_t = fb(np.nan_to_num(bt_all.reindex(ut.index).values, nan=-1e9))
-    # Fisher-style sum of the three validation -log p; r is its validation tail (same order)
-    F_v, F_t = b_v + n_v + rar[0], b_t + n_t + rar[1]
+    # model evidence once + environment evidence (combine); r is its validation tail (same order)
+    F_v, F_t = combine(b_v, n_v, rar[0]), combine(b_t, n_t, rar[1])
     fF = tail_fn(F_v)
     return {"b": (b_v, b_t), "nov": (n_v, n_t), "rar": rar, "F": (F_v, F_t),
             "r": (fF(F_v), fF(F_t)), "cons_share_test": float(gt.mean())}
@@ -638,6 +655,31 @@ def as_plain(st):
     return out
 
 
+def _recombine(st):
+    """Recompute the unit score F, its tail r, S and the per-run Z from the cached signals b, nov,
+    rar, so that cached streams (built under either rule) follow CALIBER_COMBINE."""
+    v = st.get("views")
+    if not v or "rar" not in v:
+        return
+    (bv, bt), (nv, nt), (rv, rt) = v["b"], v["nov"], v["rar"]
+    Fv, Ft = combine(bv, nv, rv), combine(bt, nt, rt)
+    f = tail_fn(Fv)
+    v["F"], v["r"] = (Fv, Ft), (f(Fv), f(Ft))
+    st["S_val"], st["S"] = v["r"]
+    per = st.get("views_per_seed") or []
+    if len(per) == st["Z"].shape[0] and all("b" in p and "nov" in p for p in per):
+        zv, zt = [], []
+        for p in per:                                # rarity is the same table for every run
+            fv, ft = combine(p["b"][0], p["nov"][0], rv), combine(p["b"][1], p["nov"][1], rt)
+            g = tail_fn(fv)
+            p["F"], p["r"] = (fv, ft), (g(fv), g(ft))
+            zv.append(p["r"][0])
+            zt.append(p["r"][1])
+        st["Z_val"], st["Z"] = np.vstack(zv), np.vstack(zt)
+    st["Umax"] = np.maximum(st["S"], st["Z"].max(0))
+    st["Umax_val"] = np.maximum(st["S_val"], st["Z_val"].max(0))
+
+
 def scored_stream(kind, artifact_dir, system, dataset, labels, seeds=(0, 1, 2)):
     """kind: "abstain" (the scorer) or "plain3" (b alone on the same units). The scored stream
     is cached under <artifact_dir>/caliber/cache (labels are re-applied on load)."""
@@ -667,6 +709,7 @@ def scored_stream(kind, artifact_dir, system, dataset, labels, seeds=(0, 1, 2)):
         with open(cp + ".tmp", "wb") as fh:
             pickle.dump(st, fh, protocol=4)
         os.replace(cp + ".tmp", cp)
+    _recombine(st)                                  # unit score under CALIBER_COMBINE (cache-safe)
     R = st["Z"].shape[0]                            # interval over runs (recomputed on load)
     for sfx in ("", "_val"):
         sem = st["Z" + sfx].std(0) / np.sqrt(R) if R > 1 else 0.0

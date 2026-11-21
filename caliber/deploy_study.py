@@ -473,10 +473,12 @@ def main():
             _INNER_U = None
             if INNER in ("nonov", "mix55") and args.scorer == "abstain" and _vpool is not None:
                 v_ = _vps[subset[0]] if (kind == "single" and _vps and len(_vps) == M) else _vpool
-                F_ = np.asarray(v_["F"][1], np.float64)
+                from caliber.abstain_score import model_view
+                b_ = np.asarray(v_["b"][1], np.float64)
                 # rarity is pooled over runs (views_per_seed holds no rar; it is the same table)
                 R_ = np.asarray(_vpool["rar"][1], np.float64)
-                _INNER_U = (F_ - np.asarray(v_["nov"][1], np.float64), F_ - R_)
+                # view 1: detector + rarity; view 2: the model's evidence (b and novelty combined)
+                _INNER_U = (b_ + R_, model_view(b_, v_["nov"][1]))
             key = tuple(subset)
             if key not in cand_cache:
                 cand_cache[key] = candidate_cases(S, st, keys, labels["attacks"], tz)
