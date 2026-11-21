@@ -38,6 +38,13 @@ NS_H = 3600 * 10**9
 _CTX = None          # transform context of the current construction run (cfg holds only primitives)
 
 
+def _path_of(label):
+    """Executable/file path of a construction label ('subject <path> <cmdline>', 'file <path>');
+    guides name programs by path, the label table prefixes the type and appends the command line."""
+    p = str(label).split(" ", 2)
+    return p[1] if len(p) > 1 and p[0] in ("subject", "file", "netflow") else str(label)
+
+
 def spec_of(cfg):
     s = getattr(cfg, "_adversary", "") or ""
     return json.loads(s) if s else None
@@ -76,6 +83,12 @@ def prepare(cfg, indexid2msg):
             if not lab and guide.get(nk) is not None and str(guide[nk]) in indexid2msg:
                 lab = indexid2msg[str(guide[nk])][1]
             if lab:
+                # resolve to the most frequent real benign label with that path, so renamed
+                # artifacts carry a label the table actually holds
+                cands = [(c, l) for (tt, l), c in benign_labels.items()
+                         if tt == t and _path_of(l) == _path_of(lab)]
+                if cands:
+                    lab = max(cands)[1]
                 top_label[t] = lab
                 guide[lk] = lab
     indexid2msg = dict(indexid2msg)
@@ -103,10 +116,12 @@ def prepare(cfg, indexid2msg):
                 if str(dst) in indexid2msg and str(dst) not in gt]
         if acts:
             ctx["actions"] = acts
+        gpath = _path_of(guide.get("proc_label") or "")
         ctx["guide_procs"] = {str(nid) for nid, (t, l) in indexid2msg.items()
-                              if t == "subject" and l == guide.get("proc_label") and str(nid) not in gt}
+                              if t == "subject" and _path_of(l) == gpath and str(nid) not in gt}
         if guide.get("proc_node") is not None:
             ctx["guide_procs"].add(str(guide["proc_node"]))
+        ctx["guide_labels"] = [guide.get("proc_label"), guide.get("file_label")]
         log(f"[adversary] guide proc={guide['proc_label']!r} file={guide.get('file_label')!r} "
             f"actions={len(acts)} guide_procs={len(ctx['guide_procs'])}")
     ctx["prime_rows"] = _priming_rows(ctx, spec.get("prime", 0))
@@ -115,6 +130,7 @@ def prepare(cfg, indexid2msg):
     if not attack_procs and not renamed:
         raise RuntimeError("adversary: no ground-truth attack nodes matched the label table")
     ctx["renamed"] = renamed
+    ctx["labels"] = indexid2msg
     _CTX = ctx
     _save(cfg, ctx)
     return indexid2msg, True
@@ -129,7 +145,11 @@ def _save(cfg, ctx):
     os.makedirs(d, exist_ok=True)
     rec = {"spec": ctx["spec"], "renamed": ctx.get("renamed", 0),
            "attack_procs": len(ctx["attack_procs"]), "synthetic_events": ctx["n_syn"],
-           "borrower": ctx["borrower"][1] if ctx["borrower"] else None}
+           "borrower": ctx["borrower"][1] if ctx["borrower"] else None,
+           "guide_labels": ctx.get("guide_labels"),
+           "guide_procs": len(ctx["guide_procs"]) if ctx.get("guide_procs") else 0}
+    if ctx["borrower"] and ctx.get("labels"):
+        rec["borrower_label"] = ctx["labels"].get(str(ctx["borrower"][1]))
     with open(os.path.join(d, "adversary.json"), "w", encoding="utf-8") as f:
         json.dump(rec, f, indent=1)
 
