@@ -34,6 +34,20 @@ from caliber.tiers import (BUCKET_H, KAPPA, _with_borrower, case_threshold, repl
 BUDGETS = [20, 50, 100, 200, 500]
 MAX_WAIT_DAYS = float(os.environ.get("CALIBER_MAX_WAIT_D", "3"))   # queue expiry
 CATCH_K = int(os.environ.get("CALIBER_CATCH_K", "0"))   # caught only through a case's top-K units
+# CALIBER_INNER=nonov (abstain scorer): within a case, units are examined in the order of the score
+# without novelty (detector score + rarity); set per replayed run in main(). Units added after it was
+# set (decoys) rank above every unit of their case (worst case for the defender).
+INNER = os.environ.get("CALIBER_INNER", "")
+_INNER_U = None
+
+
+def _rank_in(c, s):
+    """0-based rank of each element within its group c under score s (0 = best)"""
+    o = np.lexsort((-s, c))
+    r = np.empty(len(s), np.int64)
+    first = np.r_[0, np.flatnonzero(np.diff(c[o])) + 1]
+    r[o] = np.arange(len(o)) - np.repeat(first, np.diff(np.r_[first, len(o)]))
+    return r
 
 
 def _top_k(case_idx, S, idx):
@@ -41,6 +55,18 @@ def _top_k(case_idx, S, idx):
     analyst examines a case's top units, so an attack counts as caught only through them."""
     if not CATCH_K or len(idx) == 0:
         return np.ones(len(idx), bool)
+    if _INNER_U is not None:
+        pad = lambda a: a if len(a) >= len(S) else np.r_[a, np.full(len(S) - len(a), np.inf)]
+        c = case_idx[idx]
+        u1 = np.nan_to_num(pad(_INNER_U[0])[idx], nan=-np.inf)
+        if INNER == "mix55":
+            u2 = np.nan_to_num(pad(_INNER_U[1])[idx], nan=-np.inf)
+            r1 = _rank_in(c, u1)
+            f1 = r1 < 5
+            r = np.where(f1, r1, 5 + _rank_in(c, np.where(f1, -np.inf, u2)))
+        else:
+            r = _rank_in(c, u1)
+        return r < CATCH_K
     c, s = case_idx[idx], np.nan_to_num(S[idx], nan=-np.inf)
     o = np.lexsort((-s, c))
     r = np.empty(len(idx), np.int64)
@@ -402,6 +428,7 @@ def main():
         st = abstain_score.scored_stream(args.scorer, args.artifact_dir, args.system, args.dataset,
                                          labels, seeds=tuple(int(s) for s in args.seeds.split(",")))
     tz = labels.get("timezone", "US/Eastern")
+    _vpool, _vps = st.get("views"), st.get("views_per_seed")      # kept before any decoy injection
     keys, has_lin = case_keys(st, args.artifact_dir, args.dataset, meta)
     keys_val, _ = case_keys(st, args.artifact_dir, args.dataset, meta, split="val")
     print(f"cases by {'lineage' if has_lin else 'entity'}", flush=True)
@@ -442,6 +469,14 @@ def main():
             else:
                 U, U_val = S, S_val
             views = None
+            global _INNER_U
+            _INNER_U = None
+            if INNER in ("nonov", "mix55") and args.scorer == "abstain" and _vpool is not None:
+                v_ = _vps[subset[0]] if (kind == "single" and _vps and len(_vps) == M) else _vpool
+                F_ = np.asarray(v_["F"][1], np.float64)
+                # rarity is pooled over runs (views_per_seed holds no rar; it is the same table)
+                R_ = np.asarray(_vpool["rar"][1], np.float64)
+                _INNER_U = (F_ - np.asarray(v_["nov"][1], np.float64), F_ - R_)
             key = tuple(subset)
             if key not in cand_cache:
                 cand_cache[key] = candidate_cases(S, st, keys, labels["attacks"], tz)
