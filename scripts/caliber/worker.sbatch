@@ -90,7 +90,7 @@ while true; do
         echo "[$(date)] less than ${MIN_REMAINING_MIN} min left; exiting"; break
     fi
     if ! quota_ok; then
-        echo "[$(date)] fileset above ${MAX_FILES_FRAC} of its file quota; waiting"
+        echo "[$(date)] fileset near quota (limits: files ${MAX_FILES_FRAC}, blocks ${MAX_BLOCKS_FRAC}; now: $(/usr/lpp/mmfs/bin/mmlsquota -j benchmarking_PIDS fs1 2>/dev/null | awk '$2=="FILESET"{for (i = 1; i <= NF; i++) if ($i == "|") break; printf "files %.2f, blocks %.2f", $(i+1)/$(i+2), $3/$4}')); waiting"
         idle_since=$(date +%s); sleep 300; continue
     fi
     task=$(claim)
